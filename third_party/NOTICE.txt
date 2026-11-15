@@ -1,0 +1,21 @@
+Third-party attribution
+=======================
+
+This package contains protocol-level code adapted from the following MIT-licensed projects.
+
+1. @xmanrui/dsh-im — https://github.com/xmanrui/dsh-im
+   MIT License, Copyright (c) 2026 xmanrui
+
+   Adapted: WeChat iLink protocol constants, endpoints, request headers,
+   getUpdates / sendText message shapes, login flow, and the final-answer
+   accumulation semantics (src/channels/weixin/weixin-api.mjs,
+   src/channels/shared/harness-client.mjs).
+
+2. sgaofen/cli-in-wechat — https://github.com/sgaofen/cli-in-wechat
+   MIT License (declared in its package.json)
+
+   Adapted: UTF-8 code-point-safe text chunking (src/ilink/text-chunk.ts)
+   and the persistent per-user session routing idea (src/bridge/session.ts).
+
+Both are used as reference implementations. This project does not import or
+require either package at runtime; it re-implements the needed subset.

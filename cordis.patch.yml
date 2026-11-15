@@ -1,0 +1,4 @@
+# dsh-wechat-allsessions: standalone global session observer + WeChat iLink bridge.
+- insert:
+    - id: dsh-wechat-allsessions
+      name: dsh-wechat-allsessions

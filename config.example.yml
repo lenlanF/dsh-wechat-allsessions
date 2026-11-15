@@ -1,0 +1,16 @@
+# Append one id-targeted config override to <profile>/cordis.patch.yml.
+- id: dsh-wechat-allsessions
+  name: dsh-wechat-allsessions
+  config:
+    enabled: false
+    broadcastAll: false
+    defaultUserId: ''
+    maxChunkBytes: 1500
+    routeStorePath: ''
+    accountConfigPath: ''
+    statePath: ''
+    includeSessionHint: true
+    includeInternal: false
+    includeSubagents: false
+    format: plain
+    sendLogLimit: 20
