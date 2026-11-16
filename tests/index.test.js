@@ -44,13 +44,27 @@ test('apply honors real Config-shaped values', () => {
   assert.equal(handle.rules.defaultUserId, 'u1');
   assert.equal(handle.rules.maxChunkBytes, 900);
 });
-test('login route is inert while disabled', async () => {
+test('login route serves a QR before the bridge is enabled', async () => {
+  // Binding precedes enabling: a fresh install has no account, so gating the
+  // scan behind 'enabled' would make the first bind impossible.
+  const ctx = ctxStub();
+  const handle = apply(ctx, { enabled: false });
+  const route = ctx.registered.find(r => r.path.endsWith('/login'));
+  const res = { setHeader() {}, end(p) { this.body = JSON.parse(p); }, statusCode: 0 };
+  await route.handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, headers: {}, on(name, cb) { if (name === 'end') queueMicrotask(cb); return this; } }, res);
+  assert.notEqual(res.statusCode, 403, 'a disabled bridge must still hand out a QR code');
+  assert.equal(handle.rules.enabled, false, 'serving a QR must not flip enabled on its own');
+});
+
+test('a bodyless login POST is parsed as an empty object, not a JSON error', async () => {
+  // Requesting a QR code sends no body; JSON.parse('') used to fail the route.
   const ctx = ctxStub();
   apply(ctx, { enabled: false });
   const route = ctx.registered.find(r => r.path.endsWith('/login'));
   const res = { setHeader() {}, end(p) { this.body = JSON.parse(p); }, statusCode: 0 };
   await route.handler({ method: 'POST', socket: { remoteAddress: '127.0.0.1' }, headers: {}, on(name, cb) { if (name === 'end') queueMicrotask(cb); return this; } }, res);
-  assert.equal(res.statusCode, 403);
+  const text = JSON.stringify(res.body);
+  assert.ok(!text.includes('Unexpected end of JSON input'), 'an empty body must not surface a JSON parse error');
 });
 
 test('config GET returns rules, POST applies known fields', async () => {
