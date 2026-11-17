@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat-allsessions",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone WeChat iLink bridge that broadcasts final answers from any DSH session and routes WeChat replies back to the same session.",
   "license": "MIT",
   "type": "module",

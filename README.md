@@ -1,5 +1,16 @@
 # dsh-wechat-allsessions
 
+## v0.2.0 — 微信会话边界与可靠性修复（2026-11-17）
+
+- 只有绑定账号的 `ownerUserId` 或管理员显式指定的 `defaultUserId` 可发送桥接命令；陌生用户无法列出或绑定任意 DSH 会话；非所有者只能查看和使用自己的路由。
+- 老账号若缺失 `ownerUserId` 且 `defaultUserId` 留空，会安全拒绝入站命令。可在本插件重新扫码写入所有者，或明确配置受信任用户。
+- `enabled` 状态先持久化再更新运行内存；禁用扫码不启动消费轮询；重新绑定会创建新 AbortSignal；停止先取消长轮询。
+- 确认扫码接口不回传 `bot_token` 或本地配置路径；新增登录跨站来源拦截。
+- 失败消息不再提前推进 `getUpdatesBuf` 或写入去重标记；重试保留稳定 requestId，但是否达到端到端恰好一次投递仍取决于 DSH 宿主的去重行为。
+- 文件损坏时安全报错而非清空游标；未设置默认收件人时可回退到绑定的微信账号所有者。
+- 仍须避免 dsh-im 与此插件同时消费同一个微信账号。离线 47/47 通过；尚未做真实微信 iLink 端到端复测。
+
+
 独立的微信 iLink 桥接插件：把 DSH Host 中**任意工作区、任意 Session 的最终回答**推送到微信，并把微信里的回复续接回**最后一次广播的那个 Session**。
 
 - 安装与排障：[docs/INSTALL.md](docs/INSTALL.md)
@@ -12,10 +23,10 @@
 | 项 | 说明 | 源码 |
 | --- | --- | --- |
 | 运行时不依赖 dsh-im | 插件只 `import` 自己的 `lib/transport.js`、`router.js`、`text.js`、`events.js`；`inject` 为 `['settings','webServer','sessions','sessionController','credentials']`，其中 `credentials`、`sessionController` 等是 Host 服务。`package.json` 没有 `dependencies`，`peerDependencies` 只有 `@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery`，没有 `@xmanrui/dsh-im`。 | `lib/index.js:3,12-15,31`；`package.json:43-46` |
-| 零停机复用现有账号 | `start()` 读取 dsh-im 留下的账号配置 `config.json`（取 `accounts[0]` 的 `botId`、`tokenRef`、可选 `baseUrl`），通过 Host 的 `credentials.resolve(tokenRef)` 取 token，在 `notifyStart` 成功后开始长轮询；**不需要重新扫码、不需要 dsh-im 在线**。 | `lib/index.js:116-129,306-317` |
+| 复用现有账号 | 插件可读取原有微信 iLink 账号与 Host 凭据；也支持在插件内重新扫码创建账号。旧账号若缺少 `ownerUserId` 且未配置 `defaultUserId`，出于安全原因不会接受微信入站命令。 | `lib/index.js` |
 | 复用状态目录，但不改 dsh-im 的状态文件 | 本插件把游标、去重与上下文令牌写在同账号目录下**自己的** `allsessions-state.json`（`<statePath>/<botId>/allsessions-state.json`），不写 `state.json`。 | `lib/index.js:107-114,143-149,310-311` |
 | 上下文令牌按用户隔离 | `contextTokenFor(userId)` 只读**该用户**的 `contextTokens.users[userId].token`，或扁平/旧版 `contextTokens[userId].token` / `.contextToken`；**没有全局 `lastContextToken` 回退**，令牌绝不在用户之间共享。入站 `context_token` 按 `from_user_id` 存进 `contextTokens.users`。 | `lib/index.js:214-219,238-245` |
-| 新账号的扫码入口 | 本机回环 `POST /plugins/dsh-wechat-allsessions/login` 可获取二维码令牌/扫码地址并轮询状态。**未启用（`enabled: false`）时该路由返回 `403` `{error:'enable the plugin before requesting a QR login'}`**，不会发出任何 iLink 请求；启用后它也只返回二维码与状态，不会把扫码结果写成账号配置。`start()` 始终要求 `config.json` 中已有 `botId` + `tokenRef`。 | `lib/index.js:375-387,116-129`；`lib/transport.js:121-136` |
+| 新账号扫码入口 | 即使 `enabled: false`，本机 `/login` 也允许获取和轮询二维码；确认成功时将 token 写入 Host 凭据服务、账号写入配置文件，但禁用状态不会启动长轮询。 | `lib/index.js` |
 
 它**不是** dsh-im 的转发层，也不调用 `dshIm.send`；发送和接收都由插件自己的 `lib/transport.js` 直接请求 iLink 接口（`lib/index.js:173,194-198,278`）。
 
@@ -61,7 +72,7 @@
 | 状态根目录 | `~/.dsh/integrations/dsh-weixin/accounts`，状态文件为 `~/.dsh/integrations/dsh-weixin/accounts/<botId>/allsessions-state.json` |
 | 会话路由 | `~/.dsh/integrations/dsh-wechat-allsessions/sessions.json` |
 
-本机 `DSH_HOME` 对应 `C:/Users/lan/.dsh`。`config.json` 中 `accounts[0]` 需含 `botId`、`tokenRef`（`ownerUserId`、`baseUrl` 等也可存在）；`state.json` 是 dsh-im 自己的文件，本插件不写它。路由文件用「临时文件 + rename」原子写入（`lib/router.js:39-47`）。
+`DSH_HOME` 默认是当前用户的 `~/.dsh`；账号配置至少含 `botId`、`tokenRef`，新版扫码还写入 `ownerUserId`。插件自己的 `allsessions-state.json` 与 dsh-im 的状态文件互相独立。
 
 ## 找到 `defaultUserId`（`to_user_id`）
 
@@ -77,13 +88,13 @@
 ## 会话路由与微信命令
 
 - **自动路由（最后一次广播生效）**：每次广播发送前，`send()` 把 `defaultUserId -> context.sessionId` 连同 `title`、`cwd`、`updatedAt` 持久化到 `sessions.json`（`lib/index.js:190`；`lib/router.js:51-62`）。之后该用户在微信里发的普通文字会回到这个 Session（`lib/index.js:263-268`）。**每次新广播都会覆盖该用户的路由**，因此「最后一次广播的会话」就是回复目标。
-- **提交给 Host 的签名**：`submitPrompt()` 调用 `controller.prompt({ requestId, sessionId, mode: 'queue', content }, abort.signal)`——第二个参数是 **AbortSignal**，不是 source 对象；`controller.resume()` 已移除。`requestId` 为 `wechat-allsessions-<uuid>`，Host 的 `SessionController.prompt(request, signal)` 由 `request.requestId` 构造它自己的 source（`lib/index.js:208-212`；`tests/account-reuse.test.js` 的 `submitPrompt uses the real SessionController.prompt(request, signal) signature` 用例）。
+- **提交给 Host 的签名**：使用 `sessionController.prompt(request, abort.signal)`，绝不把配置或 source 对象误当作信号。若微信消息含 `message_id`，`requestId` 根据账号、用户和消息 ID 稳定生成；否则随机生成。可靠投递按至少一次设计，宿主能否严格去重仍需真实验收。
 - 命令由 `parseRouteCommand()` 解析，大小写不敏感、要求整条消息匹配（`lib/router.js:77-84`）：
 
 | 命令 | 行为 | 源码 |
 | --- | --- | --- |
-| `/session <ID>` | 手动绑定该用户到指定 Session，标题记为 `手动绑定`，回复 `已绑定会话 <ID>`。 | `lib/router.js:79-80`；`lib/index.js:258-261` |
-| `/list`（别名 `/sessions`） | 列出当前所有路由 `sessionId + title/cwd`；空时回复 `暂无会话路由`。 | `lib/router.js:81`；`lib/index.js:248-251` |
+| `/session <ID>` | 只有绑定账号所有者可以把自己指向任意指定 Session；其它明确授权的微信用户仅能继续绑定自己的现有路由。 | `lib/index.js` |
+| `/list`（别名 `/sessions`） | 账号所有者可列出已保存的所有路由；其它受信任用户只能查询自己的路由；陌生发送者不会收到会话资料。 | `lib/index.js` |
 | `/new`（别名 `/clear`） | **清除该用户的路由**（不是新建 DSH Session），回复 `已清除当前会话路由`。之后再发普通消息会收到「还没有绑定会话」提示，直到下一次广播或手动绑定。 | `lib/router.js:82`；`lib/index.js:253-256,264-266` |
 
 Session ID 可以从广播消息末尾的 `继续对话: /session <Session ID>` 或 `GET /sessions` 取得。未绑定时普通消息只收到提示文本，不会创建或提交任何任务（`lib/index.js:263-266`）。
@@ -98,7 +109,7 @@ Session ID 可以从广播消息末尾的 `继续对话: /session <Session ID>` 
 
 ## 本机回环接口
 
-`webServer.register` 存在时注册以下 4 条路由，前缀为 `/plugins/dsh-wechat-allsessions`（`lib/index.js:339-388`）。`127.0.0.1`、`::1`、`::ffff:127.0.0.1` 之外的来源被拒绝；`POST /config` 还校验 `Origin` 只允许本机（`lib/index.js:342,348-349`）。`readBody()` 有 **1 MiB** 上限，超限报 `request body too large`（`lib/index.js:85-97`）。端口以 Host 启动时显示的地址为准。
+`webServer.register` 存在时注册四条回环接口，前缀为 `/plugins/dsh-wechat-allsessions`。只接受本机连接，`POST /config` 和 `POST /login` 均拒绝不可信的跨站 Origin；请求体限制为 1 MiB。新版 `/login` 确认响应不会返回 `bot_token`。
 
 | 路径 | 方法 | 行为 |
 | --- | --- | --- |
