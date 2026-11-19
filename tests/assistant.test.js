@@ -170,6 +170,40 @@ test('per-session UI toggle gates delivery and persists across reloads', async t
   assert.equal(reloaded.getSession('s1').broadcastEnabled, true);
 });
 
+test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
+  const f = await fixture(t);
+  const response = (await f.request('status')).body;
+  assert.equal(response.version, '0.3.1');
+  assert.equal(response.enabled, true);
+  assert.equal(response.broadcastAll, true);
+  await f.handle.handleInbound(message('/help', 'wx-help-direct'));
+  assert.equal(f.prompts.length, 0, '/help must not reach SessionController');
+  assert.ok(f.sends.some(x => x.text.includes('/broadcast off <会话ID>')));
+  const status = (await f.request('status')).body;
+  assert.equal(status.sendLog.at(-1).kind, 'wechat-command');
+  assert.equal(status.sendLog.at(-1).ok, true);
+});
+
+test('WeChat-origin question emits a final answer to the same bound user', async t => {
+  const f = await fixture(t);
+  await f.handle.handleInbound(message('/session s1', 'select-wx'));
+  f.sends.length = 0;
+  await f.handle.handleInbound(message('检查工作进度', 'question-wx'));
+  assert.equal(f.prompts.length, 1);
+  const rpcId = f.prompts[0].requestId;
+  assert.ok(rpcId.startsWith('wechat-allsessions-'));
+  const session = f.records[0];
+  await f.handle.engine.enqueue(session, event('turn/start', 6));
+  await f.handle.engine.enqueue(session, event('user/message', 6, { source: { kind: 'user', rpcId } }));
+  await f.handle.engine.enqueue(session, event('assistant/message', 6, {
+    step: 1, message: { content: [{ type: 'text', text: '这是微信提问对应的回答' }] },
+  }));
+  await f.handle.engine.enqueue(session, event('turn/end', 6, { reason: 'completed' }));
+  assert.ok(f.sends.some(x => x.toUserId === 'owner' && x.text.includes('这是微信提问对应的回答')));
+  assert.ok(f.sends.some(x => x.text.startsWith('对话ID：s1\n对话标题：正在写小说')));
+  assert.equal((await f.request('status')).body.sendLog.at(-1).ok, true);
+});
+
 test('WeChat /broadcast changes are visible in the plugin UI, /help lists controls', async t => {
   const f = await fixture(t);
   await f.handle.handleInbound(message('/help', 'help-1'));
