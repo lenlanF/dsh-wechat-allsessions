@@ -1,95 +1,63 @@
-# 安装与升级 dsh-wechat-allsessions（v0.2.0）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.3.0）
 
-本插件是独立的 DSH 微信 iLink 桥接。新安装支持**插件内扫码绑定**，不依赖 dsh-im 创建账号。更新不会自动修改正在使用的 DSH Profile。
+## 保持原配置及数据
 
-## 1. 目录和约束
+**微信助手是界面显示名称，不更改包名与内部标识。** npm 包、bundle 插入 ID、设置命名空间、API 前缀仍为 **dsh-wechat-allsessions**。
 
-- `<DSH_HOME>`：当前用户的 DSH 数据目录，通常是 `%USERPROFILE%/.dsh`。
-- `<PROFILE>`：`<DSH_HOME>/profiles/desktop`。
-- `<REPOSITORY_DIR>`：本插件源码或解压后的发布目录。必须换成电脑上的真实绝对路径。
-- **同一微信账号只能有一个 iLink getUpdates 消费者。** 使用本插件前，应确认原有 dsh-im 微信通道已经关闭；不能同时开启两个消费者。
-- 不要删除旧的 `<DSH_HOME>/integrations/dsh-weixin/config.json`、凭据或状态文件，也不要清理其它工作区的会话。
+更新前建议备份 DSH 用户目录中的 integrations/dsh-wechat-allsessions/sessions.json 与现有插件配置；不要删除旧微信账号、令牌或 dsh-im 状态。不要让 dsh-im 微信通道和本插件**同时消费同一微信账号的 getUpdates**，应先关闭其中一个。
 
-## 2. 加入 DSH Profile
+## 安装
 
-可以使用 DSH 插件管理器安装，也可使用 DSH 的 bundle 配置。对于本地 `file:` 方式，在 `<PROFILE>/package.json`：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.3.0，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
-```json
-{
-  "dependencies": {
-    "dsh-wechat-allsessions": "file:<REPOSITORY_DIR>"
-  },
-  "dsh": {
-    "profile": { "bundles": ["dsh-wechat-allsessions"] }
-  }
-}
-```
-
-上面是新增字段示例，**不要用它覆盖整个 package.json**；在现有 `dependencies` 与 `dsh.profile.bundles` 内合并即可。运行 DSH 提供的 Node/pnpm 或 `pnpm install --no-frozen-lockfile`，随后检查 `<PROFILE>/node_modules/dsh-wechat-allsessions/package.json` 中的版本。
-
-把以下 insert 条目追加到 `<PROFILE>/cordis.patch.yml` 的**顶层 YAML 数组**（不要删除已有条目）：
-
-```yaml
+~~~yaml
 - insert:
     - id: dsh-wechat-allsessions
       name: dsh-wechat-allsessions
-```
+~~~
 
-如需配置覆盖条目，则单独添加：
+仅新安装/未配置时，默认 enabled:true 与 broadcastAll:true。若旧配置明确保存为 false，升级时不会替你改为 true，需要在设置里手动开启。可选的配置覆盖示例：
 
-```yaml
+~~~yaml
 - id: dsh-wechat-allsessions
   name: dsh-wechat-allsessions
   config:
-    enabled: false
-    broadcastAll: false
+    enabled: true
+    broadcastAll: true
+    includeInternal: true
+    includeSubagents: true
     defaultUserId: ''
-    includeInternal: false
-    includeSubagents: false
-```
+~~~
 
-初次安装建议 `enabled: false`，先完成账号绑定。`config.example.yml` 列出了其余选项。修改 bundle 插入记录、插件版本或 `enabled` 后应**完整重启 DSH Host**。
+不要覆盖现有 Profile package.json；若使用本地路径，务必核验实际绝对路径。更新安装版本、变更开关后应**完整重启 DSH Host**。
 
-## 3. 扫码绑定账号
+## 登录微信
 
-1. 在 DSH 设置页面找到「全会话微信桥接」，点击「获取新扫码二维码」。**即使 `enabled: false`，扫码入口仍能使用。**
-2. 微信扫码并确认。插件从微信 iLink 确认响应取得凭据，把 token 写入 DSH 的凭据服务，把账号资料保存到 `<DSH_HOME>/integrations/dsh-weixin/config.json`。
-3. 账号文件至少需要 `botId`、`tokenRef`；新版扫码会同时写 `ownerUserId`，用于验证哪个微信用户可以访问 DSH 会话。复用旧账号时，如果缺少该字段，需要重新扫码或显式配置受信任的 `defaultUserId`。
-4. 登录接口返回的 `status` 不包含私密 `bot_token`；不要通过日志、截图或公开 issue 分享凭据、上下文令牌和扫码结果原文。
-5. 禁用状态下扫码仅绑定账号，不会自动开启微信长轮询。启用桥接需在设置页保存 `enabled: true` 并重启 Host。
+在 **设置 → 微信助手** 检查已连接账号。若已复用有效的旧账号，不必再次扫码；如果尚无账号，点击“获取新扫码二维码”扫码并确认。即使配置为禁用，也能先扫码绑定。插件把 token 写入 DSH 凭据服务，不会把 token 返回设置界面。旧账号缺失 ownerUserId 时应重新扫码或配置明确受信任的 defaultUserId。
 
-## 4. 会话广播与回复
+如果 status.broadcastReady 为 false，请由绑定微信账号向机器人发送 **/help** 以建立该用户自己的 context_token；不能跨用户复用别人的令牌。插件也可以只读复用旧 dsh-im 同一用户的令牌，不改原状态文件。
 
-- 需要从所有普通 DSH 会话推送最终回复时，设置 `broadcastAll: true`；`defaultUserId` 未填写时，新版会优先使用绑定账号的 `ownerUserId`。
-- 为了获取微信回复所必需的 `context_token`，**启用桥接后先从授权微信用户向机器人发一条消息**；插件只保存该用户对应的令牌，不把其他用户令牌拿来作为后备。
-- 授权策略：仅绑定账号的 `ownerUserId` 和明确填入 `defaultUserId` 的用户可以使用微信指令。账号所有者可通过 `/session <Session ID>` 指向自己的 DSH 会话并使用 `/list` 查看保存路由；其他受信任用户只能查看和继续自己已经获分配的会话路由。
-- `/new` 与 `/clear` 清除当前发送者的路由，并不创建新的 DSH 会话。
-- 不要打开 `includeInternal` / `includeSubagents`，除非明确需要将定时任务或子代理的最终文本推送到微信。
+## 自动绑定、广播和续聊
 
-## 5. 可靠性与运行限制
+启动时自动登记全部非归档 DSH 对话。新对话出现时通过事件或每 15 秒轮询会话清单自动加入，包括暂未发言的新对话。每个会话初次登记默认开启自动广播，归档后不广播；已手动关闭过的会话不会因重启而恢复。
 
-- 每个 iLink 批次在所有消息成功处理后才保存新的 `getUpdatesBuf`；调用 DSH 失败时会保留游标重试，避免无声丢消息。
-- 去重标记只在成功提交或回复后写入；对于具备 `message_id` 的入站消息，重试使用稳定的 DSH `requestId`，但**端到端恰好一次执行仍取决于宿主幂等保障**。某些异常重启窗口可能出现重复投递。
-- 状态与路由文件格式不合法时会停止启动并报错，而不是覆盖原记录。应备份后检查文件，不能盲目删除。
-- 多段长消息仍受 `maxChunkBytes` 与最多 20 段限制；工具调用过程、文件和人工审批不会同步到微信。
+在设置页面为任何对话操作广播开关，或者微信发送 **/broadcast off 会话ID** 和 **/broadcast on 会话ID**；微信端通过 **/help** 获取完整命令列表。发送 **/list** 查看自动绑定对话。
 
-## 6. 实际验收
+微信 **/session 会话ID** 指定后续微信提问进入哪个 DSH 对话；其他会话广播不会覆盖这一选择。**/clear** 清除该选择，但不删除会话或关闭广播。
 
-请在**隔离测试会话**中核对以下项目：
+广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 
-1. `GET /plugins/dsh-wechat-allsessions/status` 显示账号已加载、`polling: true`，Host 日志不存在持续 `stale-token`。
-2. 真实授权微信账号发送一条文本，状态文件记录属于此用户的上下文令牌。陌生微信账号不能查看任何会话路由或指定 Session。
-3. DSH 会话产生最终回复后，授权微信账号收到广播；回复该消息继续写入预期 Session。
-4. 在模拟提交失败时，下一轮 `getUpdates` 不应跳过失败的消息；重启后不丢失路由与已处理消息标记。
-5. 反复扫码并重启后不会复用已 abort 的网络请求信号；启用/禁用配置能够在 Host 重启后保持。
+## 真实环境验收
 
-开发者离线回归：在本仓库执行 `node --test tests/*.test.js`。v0.2.0 源码共 47 项测试。**离线测试不能代替真实微信账号验收。**
+1. 检查已安装插件 package.json 版本为 0.3.0；设置页显示“微信助手”。
+2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
+3. 微信发送 /help、/list 并核实对话清单与参数说明。
+4. 创建一条全新 DSH 对话，不发消息，等待周期同步后核查列表；完成回答后确认微信首行 ID、第二行标题。
+5. 设置页关闭某个会话广播，验证该会话不再推送、其他会话照常；微信发送 /broadcast on 会话ID，设置页应更新。
+6. 使用 /session 切换微信回复目标；其他会话广播不应改掉该目标。
+7. 重启 Host 后检查广播开关仍生效、旧 v1 会话路由仍然存在。
+8. 若出现 no-context-token、no-account、stale-token 或其他发送失败，查发送日志和账号状态；不要直接删除历史状态文件。
 
-## 7. 升级、回退和隐私
+本地开发目录执行 **npm test** 可验证离线回归；真实微信 iLink 收发仍须按上面流程完成端到端验收。回滚到旧插件前，建议恢复旧 sessions.json 备份（v2 中新广播字段不是旧版识别范围）。
 
-- 升级前记录当前插件版本，备份 `cordis.patch.yml`、账号配置文件、`allsessions-state.json` 与路由文件；备份应妥善保管。
-- 替换插件包/`file:` 目录后更新依赖并完整重启 Host。升级后如果微信命令没有响应，优先检查 `ownerUserId` 或 `defaultUserId` 与实际消息发送者是否一致，以及是否还有其它消费者抢占 iLink。
-- 如需要回退，只替换**插件代码版本**并重启；不要自动清空已有会话、凭据、消息状态或修改其它插件。
-- `/login`、`/config` 的 POST 会检查回环请求的 Origin；公开文档使用 `<DSH_HOME>` 与 `<REPOSITORY_DIR>` 占位符，不包含真实账号或本机用户名称。
-
-进一步说明见 [README](../README.md)。
+切勿向公开 GitHub、Issue 或日志贴入真实 bot_token、context_token、二维码、用户 ID、会话内容或本机私有文件。

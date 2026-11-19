@@ -6,10 +6,10 @@ import {tmpdir} from 'node:os';
 import {apply} from '../lib/index.js';
 
 const scratch=process.env.DSH_PLUGIN_TEST_TMP || tmpdir();
-function context({settings,transport,controller}={}){
+function context({settings,transport,controller,sessions=[]}={}){
  const registered=[],handlers=[],writes=[];
  const defaults={describe:()=>[{ns:'dsh-wechat-allsessions'}],mutate:async(ns,ops)=>{writes.push({ns,ops})},configure(){}};
- const services={settings:settings??defaults,webServer:{register:r=>{registered.push(r);return()=>{}}},credentials:{resolve:async()=>({value:'FAKE_TOKEN'}),set:async()=>{}},sessionController:controller??{prompt:async()=>({accepted:true})}};
+ const services={settings:settings??defaults,webServer:{register:r=>{registered.push(r);return()=>{}}},credentials:{resolve:async()=>({value:'FAKE_TOKEN'}),set:async()=>{}},sessionController:controller??{prompt:async()=>({accepted:true})},sessions:{list:()=>sessions}};
  const ctx={fiber:{entry:{options:{id:'dsh-wechat-allsessions'}}},get:k=>services[k],on:(event,fn)=>{handlers.push({event,fn});return()=>{}},inject(){},effect(){},logger:{warn(){},info(){}}};
  return {ctx,registered,handlers,writes};
 }
@@ -21,7 +21,7 @@ async function setup(t,options={}){
  if(options.initialOwnerSession) await writeFile(routeFile,JSON.stringify({version:1,users:{owner:{sessionId:options.initialOwnerSession,title:'Audit session',cwd:'E:/Temp',updatedAt:1}}}));
  const sendCalls=[];
  const transport=options.transport??{notifyStart:async()=>{},notifyStop:async()=>{},getUpdates:async()=>({msgs:[],get_updates_buf:''}),sendText:async a=>{sendCalls.push(a);return{sent:true}}};
- const host=context({controller:options.controller});
+ const host=context({controller:options.controller,sessions:options.sessions??(options.initialOwnerSession?[{id:options.initialOwnerSession,header:{title:'Audit session'}}]:[])});
  const handle=apply(host.ctx,{enabled:options.enabled??false,accountConfigPath:configFile,statePath:stateDir,routeStorePath:routeFile,defaultUserId:options.defaultUserId??'',broadcastAll:options.broadcastAll??false},{transport,autoStart:options.autoStart??false,emptyPollDelayMs:1});
  await handle.start();
  t.after(()=>handle.stop());
@@ -41,7 +41,7 @@ test('changing enabled persists the change before claiming saved',async t=>{
 });
 
 test('unknown WeChat user cannot list other sessions or bind arbitrary session',async t=>{
- const host=await setup(t,{enabled:true});
+  const host=await setup(t,{enabled:true,initialOwnerSession:'owner-session'});
  await host.handle.handleInbound(message('owner','/session owner-session','m-owner'));
  await host.handle.handleInbound(message('stranger','/list','m-list'));
  await host.handle.handleInbound(message('stranger','/session owner-session','m-route'));

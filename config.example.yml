@@ -1,16 +1,16 @@
-# Append one id-targeted config override to <profile>/cordis.patch.yml.
+# 微信助手 (dsh-wechat-allsessions)：默认自动发现全部未归档对话并广播
 - id: dsh-wechat-allsessions
   name: dsh-wechat-allsessions
   config:
-    enabled: false
-    broadcastAll: false
+    enabled: true
+    broadcastAll: true
     defaultUserId: ''
     maxChunkBytes: 1500
     routeStorePath: ''
     accountConfigPath: ''
     statePath: ''
     includeSessionHint: true
-    includeInternal: false
-    includeSubagents: false
+    includeInternal: true
+    includeSubagents: true
     format: plain
     sendLogLimit: 20

@@ -28,6 +28,21 @@ test('engine broadcasts a completed web turn and rejects IM turns', async () => 
   assert.equal(sent.length, 0);
   assert.equal(logs.length, 1);
 });
+test('WeChat-origin completed replies broadcast when includeInternal is enabled', async () => {
+  const sent = [];
+  const engine = createBroadcastEngine({
+    rules: { enabled: true, includeInternal: true, includeSubagents: true, buildMessage: (c, t) => t },
+    describeSession: async () => ({ title: '微信助手回复' }),
+    isImOwned: rpcId => rpcId?.startsWith('wechat-allsessions-'),
+    send: async (_context, value) => { sent.push(value); return { sent: true }; },
+  });
+  await engine.enqueue(session, ev('turn/start', { turn: 3 }));
+  await engine.enqueue(session, ev('user/message', { source: { kind: 'user', rpcId: 'wechat-allsessions-example' } }, 'append'));
+  await engine.enqueue(session, ev('assistant/message', { turn: 3, step: 1, message: { content: [{ type: 'text', text: '微信里的回答' }] } }, 'append'));
+  await engine.enqueue(session, ev('turn/end', { turn: 3, reason: 'completed' }));
+  assert.deepEqual(sent, ['微信里的回答']);
+});
+
 test('engine absorbs describeSession failures', async () => {
   const warnings = [];
   const engine = createBroadcastEngine({ rules: { enabled: true, buildMessage: (c, t) => t }, describeSession: async () => { throw new Error('boom'); }, send: async () => ({ sent: true }), logger: { warn: (t) => warnings.push(t) } });

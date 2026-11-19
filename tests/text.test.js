@@ -17,10 +17,11 @@ test('planDelivery caps chunks and reports truncation', () => {
   assert.equal(plan.items.length, 2);
   assert.equal(plan.truncated, true);
 });
-test('buildBroadcastMessage includes hint and clips long body', () => {
-  const msg = buildBroadcastMessage({ title: 'T', cwd: 'D:/x', sessionId: 's1', text: 'abcdef', maxChars: 3 });
-  assert.match(msg, /\[T\]/);
+test('broadcast message always begins with session ID and title; hint is optional', () => {
+  const msg = buildBroadcastMessage({ title: 'T', sessionId: 's1', text: 'abcdef', maxChars: 3 });
+  assert.ok(msg.startsWith('对话ID：s1\n对话标题：T\n\n'));
   assert.match(msg, /\/session s1/);
   assert.match(msg, /已截断/);
-  assert.equal(buildBroadcastMessage({ sessionId: 's1', text: 'hi', includeHint: false }), 'hi');
+  assert.equal(buildBroadcastMessage({ sessionId: 's1', text: 'hi', includeHint: false }),
+    '对话ID：s1\n对话标题：未命名对话\n\nhi');
 });

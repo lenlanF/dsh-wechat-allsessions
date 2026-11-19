@@ -27,7 +27,7 @@ test('volatile config unwraps to real values', () => {
   const plain = unwrapVolatile(resolved);
   assert.equal(plain.enabled, true);
   assert.equal(normalizeRules(plain).defaultUserId, 'wx-user');
-  assert.equal(normalizeRules({}).enabled, false);
+  assert.equal(normalizeRules({}).enabled, true);
 });
 test('apply registers global observer and four loopback routes', () => {
   const ctx = ctxStub();
