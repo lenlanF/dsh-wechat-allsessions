@@ -266,7 +266,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.0');
+  assert.equal(response.version, '0.4.1');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));
@@ -295,6 +295,30 @@ test('WeChat-origin question emits a final answer to the same bound user', async
   assert.ok(f.sends.some(x => x.toUserId === 'owner' && x.text.includes('这是微信提问对应的回答')));
   assert.ok(f.sends.some(x => x.text.startsWith('对话ID：s1\n对话标题：正在写小说')));
   assert.equal((await f.request('status')).body.sendLog.at(-1).ok, true);
+});
+
+test('real broadcast send path keeps entire continuation ID after long response segmentation', async t => {
+  const f = await fixture(t);
+  const response = Array.from({ length: 100 }, (_, i) => '这是第' + i + '句完整的微信播报内容。').join('');
+  await answer(f.handle.engine, f.records[0], 107, response);
+  assert.ok(f.sends.length >= 3);
+  assert.ok(f.sends.every(s => Buffer.byteLength(s.text, 'utf8') <= 1500));
+  const footer = f.sends.at(-1).text;
+  assert.equal(footer, '继续对话：/session s1');
+  assert.ok(f.sends.slice(0, -1).every(s => !s.text.includes('/session ')));
+  assert.ok(f.sends.every(s => s.toUserId === 'owner'));
+  assert.ok(f.sends[0].text.startsWith('对话ID：s1\n对话标题：正在写小说'));
+});
+
+test('multi-message WeChat /help keeps commands on intact lines under small byte limits', async t => {
+  const f = await fixture(t);
+  f.handle.refresh({ maxChunkBytes: 100 });
+  await f.handle.handleInbound(message('/help', 'help-sentence-safe'));
+  assert.ok(f.sends.length >= 3);
+  assert.ok(f.sends.some(s => s.text.includes('/broadcast off <会话ID>')));
+  assert.ok(f.sends.every(s => Buffer.byteLength(s.text, 'utf8') <= 100));
+  assert.ok(f.sends.every(s => !s.text.endsWith('/broadcast')));
+  assert.equal(f.prompts.length, 0);
 });
 
 test('WeChat /broadcast changes are visible in the plugin UI, /help lists controls', async t => {

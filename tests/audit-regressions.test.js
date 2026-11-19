@@ -182,7 +182,8 @@ test('broadcastAll without an explicit recipient uses the bound WeChat owner',as
     {type:'assistant/message',surfaceOp:'append',data:{turn:1,step:0,message:{content:[{type:'text',text:'Audit result'}]}}},
     {type:'turn/end',data:{turn:1,reason:'completed'}},
   ]) await handle.engine.enqueue(session,event);
-  assert.equal(sent.length,1);
-  assert.equal(sent[0].toUserId,'owner');
+  assert.equal(sent.length,2,'reply body and atomic continuation command must be separate messages');
+  assert.ok(sent.every(item=>item.toUserId==='owner'));
+  assert.equal(sent.at(-1).text,'继续对话：/session session-123');
   await handle.stop();
 });
