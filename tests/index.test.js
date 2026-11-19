@@ -29,12 +29,13 @@ test('volatile config unwraps to real values', () => {
   assert.equal(normalizeRules(plain).defaultUserId, 'wx-user');
   assert.equal(normalizeRules({}).enabled, true);
 });
-test('apply registers global observer and four loopback routes', () => {
+test('apply registers global observer and five loopback routes', () => {
   const ctx = ctxStub();
   const handle = apply(ctx, { enabled: false });
   assert.equal(ctx.handlers.filter(h => h.event === 'session/event').length, 1);
   assert.equal(ctx.handlers.filter(h => h.event === 'settings/document-updated').length, 1);
-  assert.equal(ctx.registered.length, 4);
+  assert.equal(ctx.registered.length, 5);
+  assert.ok(ctx.registered.some(route => route.path.endsWith('/accounts/remove')));
   assert.equal(handle.started, false);
   assert.equal(handle.rules.enabled, false);
 });

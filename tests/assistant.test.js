@@ -43,7 +43,7 @@ async function fixture(t, options = {}) {
   const sends = [];
   const prompts = [];
   const services = {
-    settings: { describe: () => [{ ns: 'dsh-wechat-allsessions' }], mutate: async () => {}, configure: () => {} },
+    settings: { describe: () => [{ ns: 'dsh-wechat-allsessions' }], mutate: async () => { if (options.settingsFail) throw new Error('simulated settings failure'); }, configure: () => {} },
     webServer: { register(route) { registered.push(route); return () => {}; } },
     sessions: { list: () => options.listResult ? options.listResult(records) : { sessions: records, complete: true } },
     sessionController: { async prompt(request) { prompts.push(request); return { accepted: true }; } },
@@ -56,12 +56,20 @@ async function fixture(t, options = {}) {
     effect() {}, inject() {}, logger: { info() {}, warn() {} },
   };
   const transport = {
-    async notifyStart() {}, async notifyStop() {},    async pollLogin() { return options.scanConfirmation ?? { status: 'wait' }; },
+    async notifyStart() {}, async notifyStop() {},
+    async pollLogin() { return options.scanConfirmation ?? { status: 'wait' }; },
+    async getUpdates({ signal }) {
+      options.pollStarted?.();
+      return new Promise((resolve, reject) => {
+        if (signal.aborted) return reject(new Error('aborted'));
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    },
     async sendText(params) { sends.push(params); return { sent: true }; },
   };
   const handle = apply(ctx, { enabled: true, broadcastAll: true, includeInternal: true,
-    accountConfigPath, routeStorePath, statePath: stateDir }, { transport, autoStart: false, inventoryPollMs: options.inventoryPollMs ?? 15_000 });
-  await handle.start();
+    accountConfigPath, routeStorePath, statePath: stateDir }, { transport, autoStart: options.autoStart ?? false, inventoryPollMs: options.inventoryPollMs ?? 15_000 });
+  if (!options.autoStart) await handle.start();
   t.after(() => handle.stop());
   const request = async (endpoint, method = 'GET', body, options = {}) => {
     const route = registered.find(entry => entry.path.endsWith('/' + endpoint));
@@ -244,6 +252,104 @@ test('session inventory accepts data arrays, dictionary maps and snake_case iden
   assert.equal(status.body.inventoryStatus.complete, false);
 });
 
+
+const accountFor = id => ({ botId: id, ownerUserId: 'owner-' + id, tokenRef: 'FAKE_REF_' + id, metadata: { preserved: id } });
+
+test('remove an inactive saved account; others and their private fields remain unchanged', async t => {
+  const original = [accountFor('bot'), accountFor('botB'), accountFor('botC')];
+  const f = await fixture(t, { accounts: original });
+  const result = await f.request('accounts/remove', 'POST', { botId: 'botB' });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.removed, true);
+  assert.equal(result.body.restartRequired, false);
+  assert.equal(result.body.remainingCount, 2);
+  assert.equal(result.body.credentialsPreserved, true);
+  assert.equal(result.body.accountRoster.savedCount, 2);
+  assert.deepEqual(JSON.parse(await readFile(join(f.dir, 'accounts.json'), 'utf8')).accounts, [original[0], original[2]]);
+  assert.equal((await f.request('status')).body.botId, 'bot');
+  assert.doesNotMatch(JSON.stringify(result.body), /FAKE_REF_|owner-bot/);
+});
+
+test('remove the running selected account; stop it, select a saved fallback and allow restart', async t => {
+  const f = await fixture(t, { accounts: [accountFor('bot'), accountFor('botB'), accountFor('botC')] });
+  const result = await f.request('accounts/remove', 'POST', { botId: 'bot' });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.restartRequired, true);
+  assert.equal(result.body.activeBotId, 'botB');
+  assert.equal(result.body.remainingCount, 2);
+  const state = (await f.request('status')).body;
+  assert.equal(state.connected, false, 'removed bot must never be reported connected');
+  assert.equal(state.botId, null);
+  assert.equal(state.accountRoster.savedCount, 2);
+  assert.equal(state.accountRoster.activeCount, 0);
+  await f.handle.start();
+  assert.equal((await f.request('status')).body.botId, 'botB');
+  assert.deepEqual(JSON.parse(await readFile(join(f.dir, 'accounts.json'), 'utf8')).accounts.map(a => a.botId), ['botB', 'botC']);
+});
+
+test('deleting a live polling account aborts getUpdates and stops it before removing the record', async t => {
+  let started;
+  const polling = new Promise(resolve => { started = resolve; });
+  const f = await fixture(t, { autoStart: true, pollStarted: started, accounts: [accountFor('bot'), accountFor('botB')] });
+  await polling;
+  assert.equal((await f.request('status')).body.polling, true);
+  const result = await f.request('accounts/remove', 'POST', { botId: 'bot' });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.restartRequired, true);
+  const state = (await f.request('status')).body;
+  assert.equal(state.polling, false);
+  assert.equal(state.connected, false);
+  assert.deepEqual(JSON.parse(await readFile(join(f.dir, 'accounts.json'), 'utf8')).accounts.map(a => a.botId), ['botB']);
+});
+
+test('remove a selected but not loaded account, and update the next boot selection only', async t => {
+  const f = await fixture(t, { accounts: [accountFor('bot'), accountFor('botB'), accountFor('botC')] });
+  f.handle.refresh({ activeBotId: 'botC' });
+  const result = await f.request('accounts/remove', 'POST', { botId: 'botC' });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.restartRequired, true);
+  assert.equal(result.body.activeBotId, 'bot');
+  assert.equal((await f.request('status')).body.botId, 'bot');
+});
+
+test('remove the last account: show empty roster, stop active bridge and preserve route storage', async t => {
+  const f = await fixture(t, { accounts: [accountFor('bot')] });
+  const result = await f.request('accounts/remove', 'POST', { botId: 'bot' });
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.remainingCount, 0);
+  assert.equal(result.body.activeBotId, '');
+  const state = (await f.request('status')).body;
+  assert.equal(state.connected, false);
+  assert.equal(state.accountRoster.savedCount, 0);
+  assert.deepEqual(JSON.parse(await readFile(join(f.dir, 'accounts.json'), 'utf8')).accounts, []);
+  assert.equal((await f.request('sessions')).body.sessions.length, 2);
+});
+
+test('account removal API validates identity, method, locality and request origin', async t => {
+  const f = await fixture(t);
+  const checks = [
+    ['GET', { botId: 'bot' }, {}, 405],
+    ['POST', { botId: 'bot' }, { remoteAddress: '192.0.2.10' }, 403],
+    ['POST', { botId: 'bot' }, { origin: 'https://not-local.example' }, 403],
+    ['POST', { botId: '../config.json' }, {}, 404],
+    ['POST', { botId: ' ' }, {}, 400],
+    ['POST', { botId: 'z'.repeat(300) }, {}, 400],
+    ['POST', { botId: 'unknown' }, {}, 404],
+  ];
+  for (const [method, body, options, code] of checks) {
+    assert.equal((await f.request('accounts/remove', method, body, options)).statusCode, code);
+  }
+  assert.equal((await f.request('status')).body.accountRoster.savedCount, 1);
+});
+
+test('a settings write failure does not remove the running account or mutate the account file', async t => {
+  const f = await fixture(t, { settingsFail: true, accounts: [accountFor('bot'), accountFor('botB')] });
+  const before = await readFile(join(f.dir, 'accounts.json'), 'utf8');
+  const result = await f.request('accounts/remove', 'POST', { botId: 'bot' });
+  assert.equal(result.statusCode, 500);
+  assert.equal(await readFile(join(f.dir, 'accounts.json'), 'utf8'), before);
+  assert.equal((await f.request('status')).body.botId, 'bot');
+});
 test('scanning another account saves it but does not interrupt an explicitly selected account', async t => {
   const confirmed = {
     status: 'confirmed', bot_token: 'NEW_FAKE_TOKEN',
@@ -266,7 +372,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.1');
+  assert.equal(response.version, '0.4.2');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

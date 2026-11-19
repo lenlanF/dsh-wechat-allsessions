@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { deriveWeixinBotIdentity, accountFromConfirmed } from '../lib/transport.js';
-import { readAccountDocument, provisionAccount } from '../lib/account.js';
+import { readAccountDocument, provisionAccount, removeSavedAccount } from '../lib/account.js';
 
 function memoryCredentials(initial = {}) {
   const store = new Map(Object.entries(initial));
@@ -123,6 +123,51 @@ test('corrupt account documents are never erased by a new QR bind', async () => 
     await assert.rejects(() => provisionAccount({ credentials, configPath, account: next.account, token: next.token }), SyntaxError);
     assert.equal(await readFile(configPath, 'utf8'), '{"accounts":');
     assert.equal(credentials.store.size, 0);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('concurrent QR additions and removal serialize without losing unrelated accounts', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'allsessions-concurrent-'));
+  try {
+    const configPath = join(dir, 'config.json');
+    const original = [
+      { botId: 'legacy-one', tokenRef: 'shared-old-token', ownerUserId: 'a' },
+      { botId: 'legacy-two', tokenRef: 'shared-second-token', ownerUserId: 'b' },
+    ];
+    await writeFile(configPath, JSON.stringify({ version: 1, accounts: original, metadata: 'preserve-me' }));
+    const credentials = memoryCredentials({ 'shared-old-token': 'DO_NOT_ERASE' });
+    const a = accountFromConfirmed(CONFIRMED, 'https://ilinkai.weixin.qq.com/');
+    const b = accountFromConfirmed({ ...CONFIRMED,
+      ilink_bot_id: 'second-new-account', ilink_user_id: 'another-owner', bot_token: 'another-token',
+    }, 'https://ilinkai.weixin.qq.com/');
+    const [boundA, removed, boundB] = await Promise.all([
+      provisionAccount({ credentials, configPath, account: a.account, token: a.token }),
+      removeSavedAccount({ configPath, botId: 'legacy-one' }),
+      provisionAccount({ credentials, configPath, account: b.account, token: b.token }),
+    ]);
+    assert.equal(boundA.botId, a.account.botId);
+    assert.equal(removed.removed, true);
+    assert.equal(boundB.botId, b.account.botId);
+    const saved = JSON.parse(await readFile(configPath, 'utf8'));
+    assert.equal(saved.metadata, 'preserve-me');
+    assert.deepEqual(new Set(saved.accounts.map(x => x.botId)),
+      new Set(['legacy-two', a.account.botId, b.account.botId]));
+    assert.deepEqual(saved.accounts.find(x => x.botId === 'legacy-two'), original[1]);
+    assert.equal(credentials.store.get('shared-old-token'), 'DO_NOT_ERASE');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('removal refuses to overwrite a corrupted account document or an unknown account', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'allsessions-remove-corrupt-'));
+  try {
+    const configPath = join(dir, 'config.json');
+    await writeFile(configPath, '{"accounts":', 'utf8');
+    await assert.rejects(() => removeSavedAccount({ configPath, botId: 'any' }), SyntaxError);
+    assert.equal(await readFile(configPath, 'utf8'), '{"accounts":');
+    await writeFile(configPath, JSON.stringify({ accounts: [{ botId: 'one', tokenRef: 'shared' }] }));
+    assert.deepEqual(await removeSavedAccount({ configPath, botId: 'not-present' }),
+      { removed: false, remainingCount: 1 });
+    assert.equal(JSON.parse(await readFile(configPath, 'utf8')).accounts.length, 1);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 
