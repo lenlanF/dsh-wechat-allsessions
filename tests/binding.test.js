@@ -2,7 +2,7 @@
 // account, with no @xmanrui/dsh-im installation present.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -90,6 +90,39 @@ test('re-binding the same account replaces its entry instead of duplicating it',
     const document = await readAccountDocument(configPath);
     assert.equal(document.accounts.length, 1, 'a re-scan must not add a second account');
     assert.equal(credentials.store.get(rescanned.account.tokenRef), 'rotated-token', 'the token must be rotated');
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('new QR binding preserves legacy and unrelated account records exactly', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'allsessions-preserve-'));
+  try {
+    const configPath = join(dir, 'config.json');
+    const old = { botId: 'old-profile-account', ownerUserId: 'old-owner',
+      tokenRef: 'LEGACY_CREDENTIAL', createdAt: '2026-01-01' };
+    const extra = { botId: 'other-profile-account', ownerUserId: 'other-owner',
+      tokenRef: 'OTHER_CREDENTIAL', metadata: { source: 'legacy' } };
+    await writeFile(configPath, JSON.stringify({ version: 1, accounts: [old, extra] }), 'utf8');
+    const credentials = memoryCredentials();
+    const next = accountFromConfirmed(CONFIRMED, 'https://ilinkai.weixin.qq.com/');
+    await provisionAccount({ credentials, configPath, account: next.account, token: next.token });
+    const saved = JSON.parse(await readFile(configPath, 'utf8'));
+    assert.equal(saved.accounts.length, 3);
+    assert.deepEqual(saved.accounts[1], old);
+    assert.deepEqual(saved.accounts[2], extra);
+    assert.equal(credentials.store.get(next.account.tokenRef), next.token);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test('corrupt account documents are never erased by a new QR bind', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'allsessions-corrupt-account-'));
+  try {
+    const configPath = join(dir, 'config.json');
+    await writeFile(configPath, '{"accounts":');
+    const credentials = memoryCredentials();
+    const next = accountFromConfirmed(CONFIRMED, 'https://ilinkai.weixin.qq.com/');
+    await assert.rejects(() => provisionAccount({ credentials, configPath, account: next.account, token: next.token }), SyntaxError);
+    assert.equal(await readFile(configPath, 'utf8'), '{"accounts":');
+    assert.equal(credentials.store.size, 0);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
 

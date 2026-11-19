@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createWeixinTransport, extractWeixinText, normalizeBaseUrl, QR_BASE_URL } from '../lib/transport.js';
+import { createWeixinTransport, extractWeixinText, normalizeBaseUrl, QR_BASE_URL } from '../lib/transport.js';import { WECHAT_HELP } from '../lib/router.js';
 
 test('base URL is restricted to WeChat HTTPS hosts', () => {
   assert.equal(normalizeBaseUrl(QR_BASE_URL), QR_BASE_URL);
@@ -26,6 +26,18 @@ test('sendText posts the iLink message shape', async () => {
   assert.equal(body.msg.context_token, 'ctx');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer tk');
 });
+test('transport retains help paragraphs in the outgoing WeChat JSON payload', async () => {
+  const requests = [];
+  const api = createWeixinTransport({ fetchImpl: async (_, request) => {
+    requests.push(JSON.parse(request.body));
+    return { ok: true, json: async () => ({ ret: 0 }) };
+  } });
+  await api.sendText({ token: 'test-token', toUserId: 'user', text: WECHAT_HELP, contextToken: 'test-context' });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].msg.item_list[0].text_item.text, WECHAT_HELP);
+  assert.ok(requests[0].msg.item_list[0].text_item.text.includes('\n\n'));
+});
+
 test('getUpdates sends a cursor and login QR endpoint is unauthenticated', async () => {
   const calls = [];
   const fetchImpl = async (url, options) => {

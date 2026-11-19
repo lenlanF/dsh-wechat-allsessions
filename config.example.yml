@@ -4,7 +4,7 @@
   config:
     enabled: true
     broadcastAll: true
-    defaultUserId: ''
+    defaultUserId: ''    activeBotId: ''  # 可选指定微信收发账号，保存后重启 Host
     maxChunkBytes: 1500
     routeStorePath: ''
     accountConfigPath: ''
