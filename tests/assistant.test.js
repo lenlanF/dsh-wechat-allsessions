@@ -42,11 +42,19 @@ async function fixture(t, options = {}) {
   const registered = [];
   const sends = [];
   const prompts = [];
+  const selections = [];
   const services = {
     settings: { describe: () => [{ ns: 'dsh-wechat-allsessions' }], mutate: async () => { if (options.settingsFail) throw new Error('simulated settings failure'); }, configure: () => {} },
     webServer: { register(route) { registered.push(route); return () => {}; } },
     sessions: { list: () => options.listResult ? options.listResult(records) : { sessions: records, complete: true } },
-    sessionController: { async prompt(request) { prompts.push(request); return { accepted: true }; } },
+    sessionController: {
+      async prompt(request) { prompts.push(request); return { accepted: true }; },
+      async modelCatalog() { if (options.catalogError) throw options.catalogError;
+        return options.modelCatalog ?? { groups: [], failures: [] }; },
+      async selectModel(request) { selections.push(request);
+        if (options.selectModelError) throw options.selectModelError;
+        return options.selectModelResult ?? { selected: { provider: request.provider, model: request.model } }; },
+    },
     credentials: { async resolve() { return { value: 'FAKE_ACCOUNT_TOKEN' }; }, async set() {} },
   };
   const ctx = {
@@ -87,10 +95,122 @@ async function fixture(t, options = {}) {
     await route.handler(req, res);
     return res;
   };
-  return { dir, stateDir, routeStorePath, records, handlers, sends, prompts, handle, request };
+  return { dir, stateDir, routeStorePath, records, handlers, sends, prompts, selections, handle, request };
 }
 
 
+test('/models lists actual Host channels and model IDs without prompting the Agent', async t => {
+  const catalog = { groups: [
+    { id: 'native-router', name: '聚合路由', models: [
+      { id: 'direct:workbuddy:hy4-flash', name: 'WorkBuddy · Hy4 flash · x0.00' },
+    ] },
+    { id: 'deepseek-account', name: 'DeepSeek', models: [{ id: 'v4', name: 'V4' }] },
+  ], failures: [] };
+  const f = await fixture(t, { modelCatalog: catalog });
+  await f.handle.handleInbound(message('/models list -c', 'models-channels'));
+  assert.ok(f.sends.at(-1).text.includes('native-router'));
+  assert.ok(f.sends.at(-1).text.includes('deepseek-account'));
+  await f.handle.handleInbound(message('/models list native-router', 'models-channel'));
+  assert.ok(f.sends.at(-1).text.includes('direct:workbuddy:hy4-flash'));
+  assert.ok(f.sends.at(-1).text.includes('x0.00'));
+  assert.equal(f.sends.at(-1).text.includes('v4'), false);
+  await f.handle.handleInbound(message('/models list', 'models-all'));
+  assert.ok(f.sends.at(-1).text.includes('deepseek-account'));
+  assert.equal(f.prompts.length, 0, '/models commands must never reach prompt');
+  assert.equal(f.selections.length, 0, 'listing must not change Session selection');
+});
+
+test('/models sends a complete paged WeChat catalog without silent message truncation', async t => {
+  const models = Array.from({ length: 52 }, (_, i) => ({
+    id: 'model-' + String(i).padStart(2, '0'),
+    name: 'Very long useful model name ' + i + ' compatible with DSH channel',
+  }));
+  const f = await fixture(t, { modelCatalog: {
+    groups: [{ id: 'test-channel', name: '已注册渠道', models }], failures: [],
+  } });
+  await f.handle.handleInbound(message('/models list', 'many-models-1'));
+  const first = f.sends.map(s => s.text).join('');
+  assert.match(first, /model-00/u);
+  assert.match(first, /model-24/u);
+  assert.match(first, /下一页：\/models list -p 2/u);
+  assert.doesNotMatch(first, /model-25/u);
+  const offset = f.sends.length;
+  await f.handle.handleInbound(message('/models list -p 2', 'many-models-2'));
+  const second = f.sends.slice(offset).map(s => s.text).join('');
+  assert.match(second, /model-25/u);
+  assert.match(second, /model-49/u);
+  assert.match(second, /下一页：\/models list -p 3/u);
+  assert.equal(f.prompts.length, 0);
+  assert.equal(f.selections.length, 0);
+});
+
+test('/models chooses a specific DSH Session and the host records exact selected provider/model', async t => {
+  const catalog = { groups: [{ id: 'native-router', name: '聚合路由',
+    models: [{ id: 'direct:workbuddy:hy4-flash', name: 'WorkBuddy · Hy4 flash · x0.00' }] }] };
+  const f = await fixture(t, { modelCatalog: catalog });
+  await f.handle.handleInbound(message('/session s1', 'choose-s1'));
+  await f.handle.handleInbound(message('/models native-router direct:workbuddy:hy4-flash', 'select-model-s1'));
+  assert.deepEqual(f.selections, [{ sessionId: 's1', provider: 'native-router', model: 'direct:workbuddy:hy4-flash' }]);
+  assert.match(f.sends.at(-1).text, /已为当前 DSH 会话选择模型/u);
+  await f.handle.handleInbound(message('/session s2', 'choose-s2'));
+  await f.handle.handleInbound(message('/models native-router direct:workbuddy:hy4-flash', 'select-model-s2'));
+  assert.equal(f.selections[1].sessionId, 's2');
+  assert.equal(f.prompts.length, 0);
+  await f.handle.handleInbound(message('继续分析', 'later-real-prompt'));
+  assert.equal(f.prompts.at(-1).sessionId, 's2', 'follow-up goes to selected session');
+});
+
+test('/models can select an actual source channel exposed through native-router', async t => {
+  const f = await fixture(t, { modelCatalog: { groups: [
+    { id: 'native-router', name: '聚合路由', models: [
+      { id: 'direct:workbuddy:hy4-flash', name: 'WorkBuddy · Hy4 flash · x0.00' },
+    ] },
+  ], failures: [] } });
+  await f.handle.handleInbound(message('/models list -c', 'alias-channels'));
+  assert.match(f.sends.at(-1).text, /workbuddy/u);
+  await f.handle.handleInbound(message('/models list workbuddy', 'alias-list'));
+  assert.match(f.sends.at(-1).text, /ID: hy4-flash/u);
+  await f.handle.handleInbound(message('/session s1', 'alias-session'));
+  await f.handle.handleInbound(message('/models workbuddy hy4-flash', 'alias-select'));
+  assert.deepEqual(f.selections, [
+    { sessionId: 's1', provider: 'native-router', model: 'direct:workbuddy:hy4-flash' },
+  ]);
+  assert.match(f.sends.at(-1).text, /Host 路由：native-router/u);
+  assert.equal(f.prompts.length, 0);
+});
+
+test('/models refuses missing Session, unavailable model, and untrusted sender without mutation', async t => {
+  const f = await fixture(t, { modelCatalog: { groups: [
+    { id: 'native-router', name: '聚合路由', models: [{ id: 'valid', name: 'Valid' }] },
+  ] } });
+  await f.handle.handleInbound(message('/models native-router valid', 'without-session'));
+  assert.match(f.sends.at(-1).text, /先使用 \/list 和 \/session/u);
+  await f.handle.handleInbound(message('/session s1', 'models-select-session'));
+  await f.handle.handleInbound(message('/models native-router absent', 'bad-model'));
+  assert.match(f.sends.at(-1).text, /不在当前 DSH 可用目录/u);
+  await f.handle.handleInbound(message('/models list', 'untrusted-model-query', 'other'));
+  await f.handle.handleInbound(message('/models native-router valid', 'untrusted-model-mutation', 'other'));
+  assert.equal(f.selections.length, 0);
+  assert.equal(f.prompts.length, 0);
+});
+
+test('/models never confirms when DSH rejects or changes the selected model', async t => {
+  const f = await fixture(t, { modelCatalog: { groups: [
+    { id: 'native-router', name: '聚合路由', models: [{ id: 'valid', name: 'Valid' }] },
+  ] }, selectModelResult: { selected: { provider: 'other', model: 'fallback' } } });
+  await f.handle.handleInbound(message('/session s1', 'models-sel-failed-session'));
+  await f.handle.handleInbound(message('/models native-router valid', 'models-sel-failed'));
+  assert.equal(f.selections.length, 1);
+  assert.match(f.sends.at(-1).text, /未确认本次模型切换/u);
+});
+
+test('/models gracefully rejects missing or broken Host model catalog', async t => {
+  const f = await fixture(t, { catalogError: new Error('secret upstream URL and private token') });
+  await f.handle.handleInbound(message('/models list', 'catalog-failed'));
+  assert.match(f.sends.at(-1).text, /暂时不可用/u);
+  assert.doesNotMatch(f.sends.at(-1).text, /secret|private token/u);
+  assert.equal(f.selections.length, 0);
+});
 test('temporary iLink notifyStart failure still starts exactly one WeChat polling loop', async t => {
   let polls = 0;
   const f = await fixture(t, {
@@ -550,7 +670,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.11');
+  assert.equal(response.version, '0.4.12');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

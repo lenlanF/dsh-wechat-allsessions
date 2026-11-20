@@ -1,12 +1,22 @@
 # 微信助手（dsh-wechat-allsessions）
 
-**v0.4.11 · DeepSeek Harness 微信 iLink 插件**
+**v0.4.12 · DeepSeek Harness 微信 iLink 插件**
 
 微信助手默认把 DSH **全部已有的未归档对话**与微信自动关联，新建对话也自动加入；每个对话默认开启广播。每条广播**最开头**固定显示会话 ID 和会话标题。插件设置页和微信命令都可独立开关指定对话的广播，重启后保留。
 
 为兼容旧版数据，原 npm 包名、插件标识、配置命名空间、HTTP 接口前缀及 GitHub 仓库名称仍为 **dsh-wechat-allsessions**。**微信助手只是显示名称，不要将 Cordis ID 修改成中文。**
 
 ## 核心功能
+
+### 0.4.12 微信 /models 模型目录与会话切换
+
+直接使用 DSH Host sessionController.modelCatalog() 返回当前可路由 Provider 与模型（而不是静态清单），再通过 sessionController.selectModel({ sessionId, provider, model }) 修改微信当前选定的 DSH 会话，不会把 /models 当普通 AI 提问，也不需要额外账号。仅接受已绑定账号所有者或显式信任的用户。
+
+命令：/models list（所有模型）、/models list -c（所有渠道）、/models list <渠道ID>（指定渠道）、/models <渠道ID> <模型ID>（切换当前 DSH 会话）。页面一次最多 25 项，可通过 /models list -p 2 或 /models list <渠道ID> -p 2 翻页。聚合路由的来源渠道可从 Host 返回的 direct:<来源渠道>:<编码模型ID> 精确生成别名，如 /models list workbuddy、/models workbuddy hy4-flash，实际请求仍使用 native-router 的完整模型 ID；发生渠道 ID 冲突时别名使用 native-router/<来源渠道>，避免歧义。
+
+费率依据：DSH 通用目录没有统一计费字段，不凭空编造价格。聚合路由原生适配器在模型名称里明确提供 x0.00 等真实倍数时单独显示“倍率”，不把积分倍率误写为货币/token 单价。目录只显示 Host 实际返回的渠道和模型；选择失败、会话不存在或目录不可用时绝不假报成功。
+
+**DSH 已有行为**：selectModel() 在设置指定会话模型的同时，还会异步保存为新会话默认模型。其他已存在会话不直接受影响，但新会话可能继承这一默认值；正在执行的步骤沿用已捕获模型，新选择从后续调用生效。
 
 ### 0.4.11 区分进程身份单元测试与 WMI 环境集成测试
 
