@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { catalogGroups, displayModel, findModel, modelListText, resolveModelSelection, sourceChannels } from '../lib/models.js';
+import { catalogGroups, displayModel, findModel, modelListText, resolveModelSelection } from '../lib/models.js';
 import { parseRouteCommand, WECHAT_HELP } from '../lib/router.js';
 
 const catalog = {
@@ -47,24 +47,45 @@ test('model list draws only current Host catalog, no fake prices or hidden failu
   assert.equal(findModel(catalog, 'native-router', 'deepseek-v4-flash'), null);
   assert.ok(displayModel(catalogGroups(catalog)[0], catalogGroups(catalog)[0].models[1]).includes('x?'));
 });
-test('native-router source channel aliases resolve to the exact Host provider/model pair', () => {
-  const sources = sourceChannels(catalogGroups(catalog));
-  assert.deepEqual(sources.map(s => s.id), ['workbuddy', 'loomy']);
-  const channels = modelListText(catalog, { channelsOnly: true }).text;
-  assert.match(channels, /workbuddy/u);
-  assert.match(channels, /loomy/u);
-  const list = modelListText(catalog, { channel: 'workbuddy' }).text;
-  assert.match(list, /Hy4 flash/u);
-  assert.match(list, /ID: hy4-flash/u);
-  assert.match(list, /倍率 x0\.00/u);
-  assert.deepEqual(resolveModelSelection(catalog, 'workbuddy', 'hy4-flash'),
+test('native-router is one independent Provider; its owned, reused, and chain models remain distinct', () => {
+  const isolated = { groups: [
+    { id: 'native-router', name: '聚合路由', models: [
+      { id: 'autofree', name: '聚合路由 · AutoFree · x?' },
+      { id: 'chain:my-own-route', name: '聚合路由 · 自主路由链 · x?' },
+      { id: 'direct:workbuddy:hy4-flash', name: '聚合路由内部 WorkBuddy · Hy4 flash · x0.00' },
+    ] },
+    { id: 'workbuddy', name: '独立注册的 WorkBuddy', models: [
+      { id: 'hy4-flash', name: '独立渠道 · Hy4 flash' },
+    ] },
+  ], failures: [] };
+  const channels = modelListText(isolated, { channelsOnly: true }).text;
+  assert.match(channels, /模型渠道（2 个/u);
+  assert.match(channels, /聚合路由（native-router）/u);
+  assert.match(channels, /独立注册的 WorkBuddy（workbuddy）/u);
+  assert.doesNotMatch(channels, /native-router\/workbuddy|聚合路由 \/ workbuddy/u);
+  const native = modelListText(isolated, { channel: 'native-router' }).text;
+  assert.match(native, /autofree/u);
+  assert.match(native, /chain:my-own-route/u);
+  assert.match(native, /direct:workbuddy:hy4-flash/u);
+  assert.match(native, /倍率 x0\.00/u);
+  assert.doesNotMatch(native, /独立注册的 WorkBuddy/u);
+  const independent = modelListText(isolated, { channel: 'workbuddy' }).text;
+  assert.match(independent, /hy4-flash/u);
+  assert.doesNotMatch(independent, /direct:workbuddy:hy4-flash|autofree|chain:my-own-route/u);
+  assert.deepEqual(resolveModelSelection(isolated, 'native-router', 'autofree'),
+    { provider: 'native-router', model: 'autofree' });
+  assert.deepEqual(resolveModelSelection(isolated, 'native-router', 'chain:my-own-route'),
+    { provider: 'native-router', model: 'chain:my-own-route' });
+  assert.deepEqual(resolveModelSelection(isolated, 'native-router', 'direct:workbuddy:hy4-flash'),
     { provider: 'native-router', model: 'direct:workbuddy:hy4-flash' });
-  assert.deepEqual(resolveModelSelection(catalog, 'loomy', 'model/pro'),
-    { provider: 'native-router', model: 'direct:loomy:model%2Fpro' });
-  assert.equal(resolveModelSelection(catalog, 'workbuddy', 'not-a-model'), null);
-  assert.deepEqual(resolveModelSelection(catalog, 'native-router', 'direct:workbuddy:hy4-flash'),
-    { provider: 'native-router', model: 'direct:workbuddy:hy4-flash' });
+  assert.deepEqual(resolveModelSelection(isolated, 'workbuddy', 'hy4-flash'),
+    { provider: 'workbuddy', model: 'hy4-flash' });
+  assert.equal(resolveModelSelection(isolated, 'workbuddy', 'direct:workbuddy:hy4-flash'), null);
+  assert.equal(resolveModelSelection(isolated, 'native-router', 'hy4-flash'), null);
+  assert.equal(resolveModelSelection(catalog, 'workbuddy', 'hy4-flash'), null,
+    'an internal native-router model must never create a channel alias');
 });
+
 
 test('model listing paginates with explicit next command; no silent truncation', () => {
   const large = { groups: [{ id: 'busy', name: 'Busy', models: Array.from({ length: 64 }, (_, i) => ({ id: 'id-' + i, name: 'Model ' + i })) }] };

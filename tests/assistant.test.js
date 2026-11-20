@@ -160,24 +160,39 @@ test('/models chooses a specific DSH Session and the host records exact selected
   assert.equal(f.prompts.at(-1).sessionId, 's2', 'follow-up goes to selected session');
 });
 
-test('/models can select an actual source channel exposed through native-router', async t => {
+test('/models keeps aggregate internal models separate from independently registered channels', async t => {
   const f = await fixture(t, { modelCatalog: { groups: [
     { id: 'native-router', name: '聚合路由', models: [
-      { id: 'direct:workbuddy:hy4-flash', name: 'WorkBuddy · Hy4 flash · x0.00' },
+      { id: 'autofree', name: '聚合路由 · AutoFree · x?' },
+      { id: 'chain:custom-route', name: '聚合路由 · 自建路由链 · x?' },
+      { id: 'direct:workbuddy:hy4-flash', name: '聚合路由复用 · Hy4 flash · x0.00' },
+    ] },
+    { id: 'workbuddy', name: '独立 WorkBuddy Provider', models: [
+      { id: 'hy4-flash', name: 'WorkBuddy · Hy4 flash' },
     ] },
   ], failures: [] } });
-  await f.handle.handleInbound(message('/models list -c', 'alias-channels'));
-  assert.match(f.sends.at(-1).text, /workbuddy/u);
-  await f.handle.handleInbound(message('/models list workbuddy', 'alias-list'));
-  assert.match(f.sends.at(-1).text, /ID: hy4-flash/u);
-  await f.handle.handleInbound(message('/session s1', 'alias-session'));
-  await f.handle.handleInbound(message('/models workbuddy hy4-flash', 'alias-select'));
+  await f.handle.handleInbound(message('/models list -c', 'independent-channels'));
+  assert.match(f.sends.at(-1).text, /模型渠道（2 个/u);
+  await f.handle.handleInbound(message('/models list native-router', 'aggregate-models'));
+  assert.match(f.sends.at(-1).text, /autofree/u);
+  assert.match(f.sends.at(-1).text, /chain:custom-route/u);
+  assert.match(f.sends.at(-1).text, /direct:workbuddy:hy4-flash/u);
+  await f.handle.handleInbound(message('/models list workbuddy', 'independent-models'));
+  assert.match(f.sends.at(-1).text, /独立 WorkBuddy Provider/u);
+  assert.doesNotMatch(f.sends.at(-1).text, /direct:workbuddy:hy4-flash/u);
+  await f.handle.handleInbound(message('/session s1', 'separate-provider-session'));
+  await f.handle.handleInbound(message('/models workbuddy direct:workbuddy:hy4-flash', 'separate-provider-invalid'));
+  assert.match(f.sends.at(-1).text, /不在当前 DSH 可用目录/u);
+  assert.equal(f.selections.length, 0, 'no source-ID fallback into native-router');
+  await f.handle.handleInbound(message('/models native-router direct:workbuddy:hy4-flash', 'aggregate-provider-select'));
+  await f.handle.handleInbound(message('/models workbuddy hy4-flash', 'independent-provider-select'));
   assert.deepEqual(f.selections, [
     { sessionId: 's1', provider: 'native-router', model: 'direct:workbuddy:hy4-flash' },
+    { sessionId: 's1', provider: 'workbuddy', model: 'hy4-flash' },
   ]);
-  assert.match(f.sends.at(-1).text, /Host 路由：native-router/u);
   assert.equal(f.prompts.length, 0);
 });
+
 
 test('/models refuses missing Session, unavailable model, and untrusted sender without mutation', async t => {
   const f = await fixture(t, { modelCatalog: { groups: [
@@ -670,7 +685,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.12');
+  assert.equal(response.version, '0.4.13');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));
