@@ -1,4 +1,4 @@
-# 微信助手安装和升级（dsh-wechat-allsessions v0.4.14）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.4.15）
 
 ## 保持原配置及数据
 
@@ -8,7 +8,7 @@
 
 ## 安装
 
-可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.14，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.15，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
 ~~~yaml
 - insert:
@@ -37,17 +37,27 @@
 
 如果 status.broadcastReady 为 false，请由绑定微信账号向机器人发送 **/help** 以建立该用户自己的 context_token；不能跨用户复用别人的令牌。插件也可以只读复用旧 dsh-im 同一用户的令牌，不改原状态文件。
 
-## 自动绑定、广播和续聊
+## 完整发现、显式绑定、广播和续聊
 
-启动时自动登记全部非归档 DSH 对话。新对话出现时通过事件或每 15 秒轮询会话清单自动加入，包括暂未发言的新对话。每个会话初次登记默认开启自动广播，归档后不广播；已手动关闭过的会话不会因重启而恢复。
+插件自动读取全部 DSH 持久化历史会话（包括从未广播、从未加载的旧会话），但**发现不会自动绑定或开始广播**。微信发送 `/list` 查看完整目录，`/session add <会话ID>` 手动绑定需要的未归档普通会话。绑定后该会话默认开启广播；先前手动关闭的偏好保留。
 
-在设置页面为任何对话操作广播开关，或者微信发送 **/broadcast off 会话ID** 和 **/broadcast on 会话ID**；微信端通过 **/help** 获取完整命令列表。发送 **/list** 查看自动绑定对话。
-
-微信 **/session 会话ID** 指定后续微信提问进入哪个 DSH 对话；其他会话广播不会覆盖这一选择。**/clear** 清除该选择，但不删除会话或关闭广播。
+微信 `/session` 只显示已绑定会话，`/session <会话ID>` 选择微信普通消息的回复目标。设置页和 `/broadcast off/on <会话ID>` 只管理已绑定会话。`/clear` 只清除当前回复目标，不清除绑定和广播偏好。
 
 广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 微信消息按完整句子、行与段落安全分段，不截断 /session 会话命令。正文或单句超限时会明确告知省略，绝不发送无法使用的残缺会话 ID。
 
+## v0.4.15 冷态历史会话发现与手动绑定
+
+会话发现、绑定记录和微信当前回复目标已独立：`/list` 从 DSH Host `sessionController.list()` 查询持久化全部会话，不依赖只保留已加载会话的 `ctx.sessions.list()`。归档状态根据 `workspaceRegistry.archivedSessionIds` 核实；标题取 DSH Session Projection。此过程不唤醒冷 Agent、不触发模型调用。
+
+**完整微信操作**：
+
+1. `/list` 查看全部会话，含未绑定与已归档，`/list -p 2` 翻页；每条有完整 ID。
+2. `/session add <会话ID>` 手动绑定需要的未归档普通会话。新绑定默认广播开启，可 `/broadcast off <会话ID>` 关闭。发现不会自动绑定或广播。
+3. `/session` 只列已绑定会话，`/session -p 2` 翻页；`/session <会话ID>` 选择普通消息的回复目标，绑定与选择分开。
+4. `/broadcast list`、`/broadcast on/off <会话ID>` 只管理已绑定会话的偏好。
+
+为兼容此前含自动发现记录的 v2 `sessions.json`，新格式 v3 保留显式选择过的会话和手动关闭过广播的会话，原来仅自动发现的条目不再当作绑定。升级前保留原文件备份，凭据和账号数据不动。无法读取完整历史目录时 `/list` 会明确报错，`/session` 已绑定清单和现有微信轮询仍可使用。未能核实归档状态时禁止新绑定。
 ## v0.4.14 模型命令与倍率的直观展示
 
 `/models list` 和 `/models list <渠道ID>` 现在按真实 DSH Provider 分组：每个模型都有名称、已明确标注的倍率，以及独立一行的完整 `/models <渠道ID> <模型ID>` 命令。复制该行即可切换当前选中的 DSH 会话。`/models list -c` 提供渠道 ID 和对应查询命令。每页 25 项，支持 `-p 2`。
@@ -104,15 +114,16 @@ v0.4.7 的 /restart 运行链不启动 CMD 或 PowerShell。进程检查、调�
 检查安装版本不能只查看 GitHub 或源码仓库：必须核验当前 DSH Profile 下 node_modules/dsh-wechat-allsessions/package.json 版本、Host 实际加载的插件代码，并查看 /plugins/dsh-wechat-allsessions/status 的 version。若 /help 仍然进入了“最新 DSH 对话”而不是由微信助手直接回复，则当前微信消息由旧插件/其他桥接接收，排查该消费者之前不要叠加启动新的 getUpdates。状态接口新增的 sendLog.kind=wechat-command 可追踪微信命令回复发送是否成功（没有用户 ID 或敏感 token）。
 
 
-1. 检查已安装插件 package.json 版本为 0.4.14；设置页显示“微信助手”。
+1. 检查已安装插件 package.json 版本为 0.4.15；设置页显示“微信助手”。
 2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
-3. 微信发送 /help、/list 并核实对话清单与参数说明。
-4. 创建一条全新 DSH 对话，不发消息，等待周期同步后核查列表；完成回答后确认微信首行 ID、第二行标题。
-5. 设置页关闭某个会话广播，验证该会话不再推送、其他会话照常；微信发送 /broadcast on 会话ID，设置页应更新。
-6. 使用 /session 切换微信回复目标；其他会话广播不应改掉该目标。
-7. 重启 Host 后检查广播开关仍生效、旧 v1 会话路由仍然存在。
-8. 若出现 no-context-token、no-account、stale-token 或其他发送失败，查发送日志和账号状态；不要直接删除历史状态文件。
+3. 微信发送 /help、/list，确认以前从未广播的冷态旧会话也出现在全部目录，已归档会话正确标注。
+4. 发送 /session 确认只列已绑定会话；发送 /session add <会话ID> 手动绑定一个未归档旧会话，再用 /session <会话ID> 选择回复目标。
+5. 创建全新未发言 DSH 对话，检查 /list 可发现但 /session 不自动增加；完成回复也不自动广播，直至手动绑定。
+6. 设置页关闭某个已绑定会话广播，验证该会话不再推送、其他已绑定会话照常；微信发送 /broadcast on <会话ID>，设置页应更新。
+7. 使用 /session <会话ID> 切换微信回复目标；其他已绑定会话广播不应改掉该目标。
+8. 重启 Host 后检查广播开关仍生效、旧 v1/v2 显式会话绑定仍保留。
+9. 若出现 no-context-token、no-account、stale-token 或其他发送失败，查发送日志和账号状态；不要直接删除历史状态文件。
 
-本地开发目录执行 **npm test** 可验证离线回归；真实微信 iLink 收发仍须按上面流程完成端到端验收。回滚到旧插件前，建议恢复旧 sessions.json 备份（v2 中新广播字段不是旧版识别范围）。
+本地开发目录执行 **npm test** 可验证离线回归；真实微信 iLink 收发仍须按上面流程完成端到端验收。回滚到旧插件前，建议恢复升级前的 sessions.json 备份（v3 明确记录手动绑定，不应让旧插件再次把所有发现条目视为已绑定）。
 
 切勿向公开 GitHub、Issue 或日志贴入真实 bot_token、context_token、二维码、用户 ID、会话内容或本机私有文件。

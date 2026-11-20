@@ -160,7 +160,7 @@ test('malformed route storage fails closed instead of overwriting historical rou
   assert.equal(await readFile(file,'utf8'),'{CORRUPTED_ROUTE_RECORD');
 });
 
-test('broadcastAll without an explicit recipient uses the bound WeChat owner',async t=>{
+test('an explicitly bound conversation broadcasts to the saved WeChat owner without an explicit recipient',async t=>{
   const dir=await mkdtemp(join(scratch,'wechat-broadcast-'));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   const configPath=join(dir,'account.json'),stateDir=join(dir,'state');
@@ -169,6 +169,9 @@ test('broadcastAll without an explicit recipient uses the bound WeChat owner',as
   await writeFile(join(stateDir,'bot','allsessions-state.json'),JSON.stringify({
     getUpdatesBuf:'',contextTokens:{users:{owner:{token:'CONTEXT_FAKE'}}},seenMessageIds:[],
   }));
+  const {loadRouteStore}=await import('../lib/router.js');
+  const store=await loadRouteStore(join(dir,'routes.json'));
+  await store.bind('session-123',{archived:false,title:'Audit',cwd:'E:/Temp'});
   const sent=[];
   const host=context();
   const handle=apply(host.ctx,{enabled:true,broadcastAll:true,accountConfigPath:configPath,statePath:stateDir,

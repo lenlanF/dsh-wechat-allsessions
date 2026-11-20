@@ -29,6 +29,21 @@ async function fixture(t, options = {}) {
     { botId: 'bot', ownerUserId: 'owner', tokenRef: 'fake', baseUrl: 'https://ilinkai.weixin.qq.com/' },
   ] }));
   if (options.legacyRoutes) await writeFile(routeStorePath, JSON.stringify(options.legacyRoutes));
+  // Existing regression fixtures start with an explicitly stored binding.
+  // Discovery-only scenarios opt out with prebound:false.
+  if (options.prebound !== false && !options.legacyRoutes) {
+    const preset = options.records ?? [
+      { id: 's1', header: { title: '正在写小说', cwd: 'E:/Temp' } },
+      { id: 's2', header: { title: '选股分析', cwd: 'E:/Temp' } },
+      { id: 's-old', archived: true, header: { title: '已归档' } },
+    ];
+    await writeFile(routeStorePath, JSON.stringify({ version: 3, users: {}, sessions: Object.fromEntries(
+      preset.filter(r => !r.archived).map(r => [r.id ?? r.sessionId, {
+        title: r.header?.title ?? r.title ?? '', cwd: r.header?.cwd ?? r.cwd ?? '',
+        archived: false, bound: true, broadcastEnabled: true,
+      }]),
+    ) }));
+  }
   if (options.contextToken !== false) await writeFile(join(stateDir, 'bot', 'allsessions-state.json'),
     JSON.stringify({ contextTokens: { users: { owner: { token: 'OWN_CTX' } } } }));
   if (options.legacyToken) await writeFile(join(stateDir, 'bot', 'state.json'),
@@ -47,7 +62,22 @@ async function fixture(t, options = {}) {
     settings: { describe: () => [{ ns: 'dsh-wechat-allsessions' }], mutate: async () => { if (options.settingsFail) throw new Error('simulated settings failure'); }, configure: () => {} },
     webServer: { register(route) { registered.push(route); return () => {}; } },
     sessions: { list: () => options.listResult ? options.listResult(records) : { sessions: records, complete: true } },
+    workspaceRegistry: options.archiveRegistryUnavailable ? undefined : { get archivedSessionIds() {
+      return options.archivedIds ?? records.filter(r => r.archived === true)
+        .map(r => r.sessionId ?? r.id);
+    } },
     sessionController: {
+      async list() {
+        if (options.directoryError) throw options.directoryError;
+        if (options.controllerListResult) return options.controllerListResult(records);
+        return { items: records.map(row => ({
+          sessionId: row.sessionId ?? row.id ?? row.session_id,
+          cwd: row.header?.cwd ?? row.cwd ?? '',
+          origin: row.header?.origin ?? row.origin,
+          parentSessionId: row.header?.parentSessionId ?? row.parentSessionId,
+          projections: { values: { title: row.header?.title ?? row.title ?? '' } },
+        })) };
+      },
       async prompt(request) { prompts.push(request); return { accepted: true }; },
       async modelCatalog() { if (options.catalogError) throw options.catalogError;
         return options.modelCatalog ?? { groups: [], failures: [] }; },
@@ -423,35 +453,161 @@ test('restart completion from a saved ticket goes only to its bound owner and se
   assert.equal(f.sends.filter(x => x.text.includes('已完成重启')).length, 0);
 });
 
-test('all existing non-archived chats are registered automatically and start enabled', async t => {
+test('unavailable DSH persistent catalog cannot prevent WeChat startup or existing binding management', async t => {
+  const f = await fixture(t, { prebound: true, directoryError: new Error('fake private credentials URL') });
+  const status = (await f.request('status')).body;
+  assert.equal(status.connected, true);
+  assert.equal(status.inventoryStatus.available, false);
+  await f.handle.handleInbound(message('/list', 'directory-offline-list'));
+  assert.match(f.sends.at(-1).text, /暂时无法读取/u);
+  await f.handle.handleInbound(message('/session', 'directory-offline-bound'));
+  assert.match(f.sends.at(-1).text, /已绑定会话/u);
+  await f.handle.handleInbound(message('/session add missing', 'directory-offline-bind'));
+  assert.match(f.sends.at(-1).text, /无法核实完整会话目录/u);
+  assert.doesNotMatch(f.sends.map(s => s.text).join('\n'), /private credentials URL/u);
+  assert.equal(f.prompts.length, 0);
+});
+
+test('malformed /list and /session commands are local usage errors, not AI prompts', async t => {
+  const f = await fixture(t, { prebound: false });
+  for (const [command, marker] of [
+    ['/list -p 0', 'badlist0'],
+    ['/list -p nope', 'badlistx'],
+    ['/session add', 'badadd'],
+    ['/session -p 0', 'badpage'],
+  ]) {
+    await f.handle.handleInbound(message(command, marker));
+    assert.match(f.sends.at(-1).text, /全部会话：|已绑定列表：/u);
+  }
+  assert.equal(f.prompts.length, 0);
+});
+test('/list shows all cold DSH sessions; /session lists only explicitly bound ones', async t => {
+  const records = [
+    { id: 'cold-old', header: { title: '从未广播的历史会话' } },
+    { id: 'running', header: { title: '当前会话' } },
+    { id: 'archived-old', archived: true, header: { title: '归档的会话' } },
+  ];
+  const f = await fixture(t, { records, prebound: false });
+  await f.handle.handleInbound(message('/list', 'all-sessions-1'));
+  const list = f.sends.at(-1).text;
+  assert.match(list, /全部会话（3 个/u);
+  assert.match(list, /从未广播的历史会话/u);
+  assert.match(list, /cold-old/u);
+  assert.match(list, /\/session add cold-old/u);
+  assert.match(list, /📦 已归档/u);
+  await f.handle.handleInbound(message('/session', 'bound-none'));
+  assert.match(f.sends.at(-1).text, /尚未绑定会话/u);
+  await f.handle.handleInbound(message('/session cold-old', 'select-not-bound'));
+  assert.match(f.sends.at(-1).text, /未绑定或已归档/u);
+  assert.equal((await loadRouteStore(f.routeStorePath)).getSession('cold-old'), null);
+  await f.handle.handleInbound(message('/session add cold-old', 'explicit-bind'));
+  assert.match(f.sends.at(-1).text, /已手动绑定/u);
+  const state = await loadRouteStore(f.routeStorePath);
+  assert.equal(state.getSession('cold-old').bound, true);
+  assert.equal(state.get('owner'), null, 'binding does not implicitly select a reply route');
+  await f.handle.handleInbound(message('/session', 'bound-one'));
+  assert.match(f.sends.at(-1).text, /已绑定会话（1 个/u);
+  assert.match(f.sends.at(-1).text, /cold-old/u);
+  assert.doesNotMatch(f.sends.at(-1).text, /running|archived-old/u);
+  await f.handle.handleInbound(message('/session cold-old', 'select-explicit-bound'));
+  assert.match(f.sends.at(-1).text, /已选择回复会话/u);
+  await f.handle.handleInbound(message('继续历史讨论', 'prompt-cold-old'));
+  assert.equal(f.prompts.at(-1)?.sessionId, 'cold-old');
+  await f.handle.handleInbound(message('/session add cold-old', 'idempotent-add'));
+  assert.match(f.sends.at(-1).text, /已经绑定/u);
+  assert.deepEqual((await f.request('sessions')).body.sessions.map(s => s.sessionId), ['cold-old']);
+});
+
+test('archived, subagent, nonexistent, and unauthorized sessions cannot be manually bound', async t => {
+  const f = await fixture(t, { prebound: false, records: [
+    { id: 'archived', archived: true, header: { title: '归档' } },
+    { id: 'child', header: { title: '子代理', origin: 'subagent', parentSessionId: 'root' } },
+    { id: 'normal', header: { title: '正常' } },
+  ] });
+  await f.handle.handleInbound(message('/session add archived', 'archive-add'));
+  assert.match(f.sends.at(-1).text, /已归档/u);
+  await f.handle.handleInbound(message('/session add child', 'child-add'));
+  assert.match(f.sends.at(-1).text, /子代理/u);
+  await f.handle.handleInbound(message('/session add missing', 'missing-add'));
+  assert.match(f.sends.at(-1).text, /没有这个会话/u);
+  const before = f.sends.length;
+  await f.handle.handleInbound(message('/session add normal', 'intruder-add', 'stranger'));
+  assert.equal(f.sends.length, before);
+  await f.handle.handleInbound(message('/broadcast on normal', 'unbound-broadcast'));
+  assert.match(f.sends.at(-1).text, /未绑定/u);
+  const saved = await loadRouteStore(f.routeStorePath);
+  assert.deepEqual(saved.listSessions(), []);
+});
+
+test('/list pagination covers cold history without auto-binding, while /session paginates bound records', async t => {
+  const records = Array.from({ length: 43 }, (_, index) => ({
+    id: 'history-' + String(index).padStart(2, '0'),
+    header: { title: '历史会话-' + index },
+  }));
+  const f = await fixture(t, { prebound: false, records });
+  await f.handle.handleInbound(message('/list', 'page-1'));
+  const firstPage = f.sends.map(s => s.text).join('\n');
+  assert.match(firstPage, /第 1\/3 页/u);
+  assert.match(firstPage, /\/list -p 2/u);
+  assert.doesNotMatch(firstPage, /history-42/u);
+  const page3Offset = f.sends.length;
+  await f.handle.handleInbound(message('/list -p 3', 'page-3'));
+  assert.match(f.sends.slice(page3Offset).map(s => s.text).join('\n'), /history-42/u);
+  assert.equal((await f.request('sessions')).body.sessions.length, 0);
+  for (const row of records) {
+    await f.handle.handleInbound(message('/session add ' + row.id, 'manual-' + row.id));
+  }
+  const boundOffset = f.sends.length;
+  await f.handle.handleInbound(message('/session', 'bound-page-1'));
+  assert.match(f.sends.slice(boundOffset).map(s => s.text).join('\n'), /已绑定会话（43 个，第 1\/3 页）/u);
+  await f.handle.handleInbound(message('/session -p 3', 'bound-page-3'));
+  assert.match(f.sends.at(-1).text, /已绑定会话（43 个，第 3\/3 页）/u);
+});
+
+test('when archive registry is unavailable, /list does not claim non-archived and add is blocked', async t => {
+  const f = await fixture(t, { prebound: false, records: [
+    { id: 'unknown-archive', header: { title: '状态未知' } },
+  ], archiveRegistryUnavailable: true });
+  await f.handle.handleInbound(message('/list', 'unknown-archive-list'));
+  assert.match(f.sends.at(-1).text, /归档状态未核实/u);
+  await f.handle.handleInbound(message('/session add unknown-archive', 'unknown-archive-add'));
+  assert.match(f.sends.at(-1).text, /归档状态未核实/u);
+  assert.deepEqual((await f.request('sessions')).body.sessions, []);
+});
+test('pre-existing explicit bindings remain bound; archived unknown sessions remain discovery-only', async t => {
   const f = await fixture(t);
   const sessions = await f.request('sessions');
   assert.equal(sessions.statusCode, 200);
   assert.deepEqual(sessions.body.sessions.map(s => s.sessionId).sort(), ['s1', 's2']);
-  assert.ok(sessions.body.sessions.every(s => s.broadcastEnabled));
+  assert.ok(sessions.body.sessions.every(s => s.bound === true && s.broadcastEnabled));
   const store = await loadRouteStore(f.routeStorePath);
-  assert.equal(store.getSession('s-old').archived, true);
+  assert.equal(store.getSession('s-old'), null, 'an archived historical row must not be auto-bound');
   assert.equal(store.getSession('s1').title, '正在写小说');
-  assert.equal(store.getSession('s2').title, '选股分析');
+  await f.handle.handleInbound(message('/list', 'list-archived-historical'));
+  assert.ok(f.sends.some(s => s.text.includes('📦 已归档') && s.text.includes('s-old')));
 });
 
-test('idle newly opened chat is registered by timer without requiring a session event', async t => {
+test('idle newly discovered sessions appear only in /list, never auto-bind or broadcast', async t => {
   const records = [{ id: 'existing', header: { title: '已有' } }];
-  const f = await fixture(t, { records, inventoryPollMs: 30 });
-  const initial = await loadRouteStore(f.routeStorePath);
-  assert.ok(initial.getSession('existing'));
+  const f = await fixture(t, { records, prebound: false, inventoryPollMs: 30 });
+  assert.equal((await f.request('sessions')).body.sessions.length, 0);
   records.push({ id: 'idle-new', header: { title: '暂未发言的新对话' } });
-  for (let i = 0; i < 25; i++) {
-    const current = await loadRouteStore(f.routeStorePath);
-    if (current.getSession('idle-new')) break;
+  let listed = false;
+  for (let i = 0; i < 30; i++) {
+    await f.handle.handleInbound(message('/list', 'idle-list-' + i));
+    if (f.sends.at(-1)?.text.includes('idle-new')) { listed = true; break; }
     await new Promise(resolve => setTimeout(resolve, 10));
   }
-  const registered = await loadRouteStore(f.routeStorePath);
-  assert.equal(registered.getSession('idle-new')?.title, '暂未发言的新对话');
-  assert.equal(registered.getSession('idle-new')?.broadcastEnabled, true);
+  assert.equal(listed, true);
+  const store = await loadRouteStore(f.routeStorePath);
+  assert.equal(store.getSession('idle-new'), null);
+  await f.handle.handleInbound(message('/session', 'idle-bound-list'));
+  assert.match(f.sends.at(-1).text, /尚未绑定会话/u);
+  await answer(f.handle.engine, records[1], 22, '未绑定不能广播');
+  assert.equal(f.sends.some(s => s.text.includes('未绑定不能广播')), false);
 });
 
-test('removed/archived DSH session is excluded during inventory reconciliation and can return', async t => {
+test('missing Session is not misclassified as archived; explicit archive and restore are authoritative', async t => {
   const records = [{ id: 'stays' }, { id: 'will-archive' }];
   const f = await fixture(t, { records });
   let store = await loadRouteStore(f.routeStorePath);
@@ -459,9 +615,13 @@ test('removed/archived DSH session is excluded during inventory reconciliation a
   records.splice(1, 1);
   await f.handle.syncSessionInventory();
   store = await loadRouteStore(f.routeStorePath);
+  assert.equal(store.getSession('will-archive').archived, false,
+    'missing a persisted list row is not proof of archive');
+  records.push({ id: 'will-archive', archived: true });
+  await f.handle.syncSessionInventory();
+  store = await loadRouteStore(f.routeStorePath);
   assert.equal(store.getSession('will-archive').archived, true);
-  assert.equal((await f.request('sessions')).body.sessions.length, 1);
-  records.push({ id: 'will-archive' });
+  records[1].archived = false;
   await f.handle.syncSessionInventory();
   store = await loadRouteStore(f.routeStorePath);
   assert.equal(store.getSession('will-archive').archived, false);
@@ -475,23 +635,16 @@ test('per-session configuration API refuses remote access and cross-site modific
   assert.equal((await loadRouteStore(f.routeStorePath)).getSession('s1').broadcastEnabled, true);
 });
 
-test('new event auto-registers its chat without changing existing preferences', async t => {
+test('new Session events never auto-bind, and existing preferences are unchanged', async t => {
   const f = await fixture(t);
   const disabled = await f.request('sessions', 'POST', { sessionId: 's1', broadcastEnabled: false });
   assert.equal(disabled.body.sessions.find(x => x.sessionId === 's1').broadcastEnabled, false);
   const observer = f.handlers.find(h => h.eventName === 'session/event').fn;
   observer({ id: 'fresh', header: {} }, { type: 'session/title', data: { title: '刚创建的对话' } });
-  for (let i = 0; i < 15; i++) {
-    const store = await loadRouteStore(f.routeStorePath);
-    if (store.getSession('fresh')) break;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
+  await new Promise(resolve => setTimeout(resolve, 60));
   const store = await loadRouteStore(f.routeStorePath);
-  assert.equal(store.getSession('fresh').title, '刚创建的对话');
-  assert.equal(store.getSession('fresh').broadcastEnabled, true);
+  assert.equal(store.getSession('fresh'), null);
   assert.equal(store.getSession('s1').broadcastEnabled, false);
-  await store.syncSessions([{ sessionId: 'fresh' }]);
-  assert.equal(store.getSession('fresh').title, '刚创建的对话', 'missing titles must not erase a known title');
 });
 
 test('per-session UI toggle gates delivery and persists across reloads', async t => {
@@ -544,12 +697,12 @@ test('all saved WeChat accounts appear in the roster without exposing tokens or 
   assert.equal(switched.accountRoster.savedCount, 3);
 });
 
-test('partial/unknown DSH inventory never archives existing chats', async t => {
+test('partial or unrecognized DSH directory cannot reclassify or auto-bind sessions', async t => {
   let mode = 'complete';
   const records = [{ id: 's1', header: { title: '第一条' } }, { id: 's2', header: { title: '第二条' } }];
-  const f = await fixture(t, { records, listResult: rows => mode === 'complete'
-    ? { data: { items: rows, total: 2, complete: true } }
-    : mode === 'partial' ? { items: rows.slice(0, 1), hasMore: true, total: 2 }
+  const f = await fixture(t, { records, controllerListResult: rows => mode === 'complete'
+    ? { items: rows.map(row => ({ sessionId: row.id, projections: { values: { title: row.header.title } } })) }
+    : mode === 'partial' ? { items: [{ sessionId: 's1' }], hasMore: true, total: 2 }
       : { unknown: 'shape' } });
   assert.equal((await f.request('status')).body.inventoryStatus.complete, true);
   mode = 'partial';
@@ -558,32 +711,36 @@ test('partial/unknown DSH inventory never archives existing chats', async t => {
   assert.equal(response.body.inventoryStatus.complete, false);
   let stored = await loadRouteStore(f.routeStorePath);
   assert.equal(stored.getSession('s2').archived, false);
+  await f.handle.handleInbound(message('/list', 'partial-list-message'));
+  assert.match(f.sends.at(-1).text, /暂时无法读取/u);
   mode = 'unknown';
   const unknown = await f.request('status');
   assert.equal(unknown.body.inventoryStatus.supported, false);
   stored = await loadRouteStore(f.routeStorePath);
   assert.equal(stored.getSession('s2').archived, false);
 });
-
-test('Map inventories with IDs in keys discover all represented conversations', async t => {
-  const f = await fixture(t, { records: [{ id: 'alpha', title: '原来' }], listResult: () =>
-    ({ sessions: new Map([['mapped', { header: { title: '映射会话' } }], ['beta', { title: '普通会话' }]]), complete: true }) });
-  const response = await f.request('sessions');
-  assert.deepEqual(response.body.sessions.map(s => s.sessionId).sort(), ['beta', 'mapped']);
-  assert.equal(response.body.inventoryStatus.complete, true);
+test('DSH persistent list is authoritative; loaded-session Maps are not a complete catalog', async t => {
+  const f = await fixture(t, { prebound: false, records: [
+    { id: 'alpha', title: 'Host 历史会话' },
+  ], listResult: () => ({ sessions: new Map([['mapped', { title: '仅内存可见' }]]), complete: true }) });
+  assert.equal((await f.request('sessions')).body.sessions.length, 0);
+  await f.handle.handleInbound(message('/list', 'persistent-list-primary'));
+  assert.match(f.sends.at(-1).text, /alpha/u);
+  assert.doesNotMatch(f.sends.at(-1).text, /mapped/u);
 });
-
-test('session inventory accepts data arrays, dictionary maps and snake_case identifiers', async t => {
-  let shape = 'data';
-  const f = await fixture(t, { listResult: () => shape === 'data'
-    ? { data: [{ session_id: 'snake-id', title: '蛇形 ID' }], complete: true }
-    : { sessions: { 'keyed-id': { header: { title: '字典 ID' } } }, complete: false } });
-  let status = await f.request('sessions');
-  assert.deepEqual(status.body.sessions.map(x => x.sessionId), ['snake-id']);
-  shape = 'dictionary';
-  status = await f.request('sessions');
-  assert.deepEqual(status.body.sessions.map(x => x.sessionId).sort(), ['keyed-id','snake-id']);
-  assert.equal(status.body.inventoryStatus.complete, false);
+test('unknown persistent directory shape cannot wipe previous bindings', async t => {
+  let bad = false;
+  const f = await fixture(t, { controllerListResult: rows => bad
+    ? { data: [{ session_id: 'unverified', title: '不受支持' }], complete: true }
+    : { items: rows.map(row => ({ sessionId: row.id, projections: { values: { title: row.header?.title } } })) } });
+  assert.equal((await f.request('status')).body.inventoryStatus.complete, true);
+  bad = true;
+  const response = await f.request('sessions');
+  assert.equal(response.body.inventoryStatus.supported, false);
+  assert.deepEqual(response.body.sessions.map(row => row.sessionId).sort(), ['s1', 's2']);
+  await f.handle.handleInbound(message('/list', 'unknown-list-shape'));
+  assert.match(f.sends.at(-1).text, /暂时无法读取/u);
+  assert.equal((await loadRouteStore(f.routeStorePath)).getSession('s1').bound, true);
 });
 
 
@@ -706,7 +863,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.14');
+  assert.equal(response.version, '0.4.15');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));
@@ -785,18 +942,20 @@ test('broadcast does not overwrite an explicitly selected reply route', async t 
   assert.equal((await loadRouteStore(f.routeStorePath)).get('owner').sessionId, 's2');
 });
 
-test('legacy v1 reply routes survive migration and archived chats cannot be toggled', async t => {
+test('legacy v1 reply route stays bound but archived discovered history cannot be toggled', async t => {
   const f = await fixture(t, { legacyRoutes: { version: 1, users: {
     owner: { sessionId: 's2', title: '原路由', cwd: 'E:/Temp', updatedAt: 1 },
   } } });
   const store = await loadRouteStore(f.routeStorePath);
   assert.equal(store.get('owner').sessionId, 's2');
-  assert.equal(store.getSession('s-old').archived, true);
+  assert.equal(store.getSession('s2').bound, true);
+  assert.equal(store.getSession('s-old'), null);
   const response = await f.request('sessions', 'POST', { sessionId: 's-old', broadcastEnabled: false });
   assert.equal(response.statusCode, 404);
-  assert.equal((await loadRouteStore(f.routeStorePath)).getSession('s-old').broadcastEnabled, true);
+  await f.handle.handleInbound(message('/list', 'old-archive-from-v1'));
+  assert.match(f.sends.at(-1).text, /已归档/u);
   await answer(f.handle.engine, f.records[2], 1, 'archived');
-  assert.equal(f.sends.length, 0);
+  assert.equal(f.sends.some(s => s.text.includes('archived')), false);
 });
 
 test('existing dsh-im per-user context token is read-only reused without leaking cross-user token', async t => {
