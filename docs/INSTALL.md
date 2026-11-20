@@ -1,4 +1,4 @@
-# 微信助手安装和升级（dsh-wechat-allsessions v0.4.2）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.4.3）
 
 ## 保持原配置及数据
 
@@ -8,7 +8,7 @@
 
 ## 安装
 
-可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.2，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.3，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
 ~~~yaml
 - insert:
@@ -48,6 +48,12 @@
 广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 微信消息按完整句子、行与段落安全分段，不截断 /session 会话命令。正文或单句超限时会明确告知省略，绝不发送无法使用的残缺会话 ID。
 
+## 微信远程重启 Desktop
+
+已绑定且受信任的微信用户发送 /restart，将收到“正在重启”，随后微信助手调用插件自带 Windows 重启驱动重启 DSH Desktop 应用及 Host。只有新 Desktop 主进程 ID 与旧 ID 不同、微信助手重新载入当前账号并具有回信上下文，才发送“重启完成”。同一有效期内的待执行请求不会重复重启，失败不会伪装成成功。安装包需包含 scripts/restart-desktop.ps1，不需要另行下载或配置。
+
+正式打包版 Electron 的“重启应用与 Host”开发菜单并不向 Host 插件开放；本方案集成于微信助手，通过其专用 Windows 驱动工作，不会篡改 DSH 官方应用代码。当前插件驱动会强制终止旧 Desktop 主进程后重新启动相同 exe，而非调用正式版未公开的 app.relaunch()。此过程可能中断尚未保存的界面或运行任务。
+
 ## 移除微信账号
 
 在设置页「连接状态与扫码」每条已保存的微信账号右侧点击「移除」，确认后通过仅限本机的 POST /plugins/dsh-wechat-allsessions/accounts/remove 解除这条账号绑定。接口要求 JSON 对象，例如 {"botId":"已保存账号的Bot ID"}，会返回剩余数量及是否需要重启 Host；普通未启用账号直接移除，当前轮询账号会先停收发、再移除，剩余账号的第一个成为下次 Host 启动的候选。如移除最后一个账号，后续可重新扫码绑定。
@@ -59,7 +65,7 @@
 检查安装版本不能只查看 GitHub 或源码仓库：必须核验当前 DSH Profile 下 node_modules/dsh-wechat-allsessions/package.json 版本、Host 实际加载的插件代码，并查看 /plugins/dsh-wechat-allsessions/status 的 version。若 /help 仍然进入了“最新 DSH 对话”而不是由微信助手直接回复，则当前微信消息由旧插件/其他桥接接收，排查该消费者之前不要叠加启动新的 getUpdates。状态接口新增的 sendLog.kind=wechat-command 可追踪微信命令回复发送是否成功（没有用户 ID 或敏感 token）。
 
 
-1. 检查已安装插件 package.json 版本为 0.4.2；设置页显示“微信助手”。
+1. 检查已安装插件 package.json 版本为 0.4.3；设置页显示“微信助手”。
 2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
 3. 微信发送 /help、/list 并核实对话清单与参数说明。
 4. 创建一条全新 DSH 对话，不发消息，等待周期同步后核查列表；完成回答后确认微信首行 ID、第二行标题。

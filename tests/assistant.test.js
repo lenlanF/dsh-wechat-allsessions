@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply } from '../lib/index.js';
-import { loadRouteStore, parseRouteCommand, WECHAT_HELP } from '../lib/router.js';
+import { loadRouteStore, parseRouteCommand, WECHAT_HELP } from '../lib/router.js';import { readRestartTicket, writeRestartTicket, restartTicketPath } from '../lib/restart.js';
 
 const tempRoot = process.env.DSH_PLUGIN_TEST_TMP || tmpdir();
 const message = (text, id = 'msg-1', from = 'owner') => ({
@@ -68,7 +68,8 @@ async function fixture(t, options = {}) {
     async sendText(params) { sends.push(params); return { sent: true }; },
   };
   const handle = apply(ctx, { enabled: true, broadcastAll: true, includeInternal: true,
-    accountConfigPath, routeStorePath, statePath: stateDir }, { transport, autoStart: options.autoStart ?? false, inventoryPollMs: options.inventoryPollMs ?? 15_000 });
+    accountConfigPath, routeStorePath, statePath: stateDir }, { transport, autoStart: options.autoStart ?? false, inventoryPollMs: options.inventoryPollMs ?? 15_000,
+    desktopRestart: options.desktopRestart, restartMonitorMs: options.restartMonitorMs ?? 30 });
   if (!options.autoStart) await handle.start();
   t.after(() => handle.stop());
   const request = async (endpoint, method = 'GET', body, options = {}) => {
@@ -88,6 +89,88 @@ async function fixture(t, options = {}) {
   };
   return { dir, stateDir, routeStorePath, records, handlers, sends, prompts, handle, request };
 }
+
+
+test('/restart is handled by the plugin with a durable ticket and does not submit a DSH prompt', async t => {
+  let pid = 151;
+  const launched = [];
+  const driver = {
+    async inspect() { return { pid, exePath: 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe' }; },
+    async launch(path) { launched.push(path); },
+  };
+  const f = await fixture(t, { desktopRestart: driver, restartMonitorMs: 30 });
+  await f.handle.handleInbound(message('/restart', 'restart-id-1'));
+  assert.equal(f.prompts.length, 0);
+  assert.ok(f.sends.some(x => x.text.includes('正在重启 DSH Desktop')));
+  assert.ok(f.sends.every(x => !x.text.includes('已完成重启')));
+  assert.equal(launched.length, 1);
+  const file = restartTicketPath(f.stateDir, 'bot');
+  assert.equal(launched[0], file);
+  const ticket = await readRestartTicket(file);
+  assert.equal(ticket.phase, 'armed');
+  assert.equal(ticket.userId, 'owner');
+  assert.equal(ticket.oldMainPid, pid);
+  assert.ok(!JSON.stringify(ticket).includes('FAKE_ACCOUNT_TOKEN'));
+  assert.ok(!JSON.stringify(ticket).includes('INBOUND_CTX'));
+
+  await f.handle.handleInbound(message('/restart', 'restart-id-2'));
+  assert.equal(launched.length, 1, 'duplicate /restart must not spawn a second watchdog');
+  assert.ok(f.sends.some(x => x.text.includes('不会重复重启')));
+  await writeRestartTicket(file, { ...ticket, phase: 'restarted', newMainPid: 152 });
+  await new Promise(resolve => setTimeout(resolve, 280));
+  assert.equal(f.sends.some(x => x.text.includes('已完成重启')), false,
+    'an unchanged main PID cannot be reported as a completed restart');
+  pid = 152;
+  const deadline = Date.now() + 3_000;
+  while (!f.sends.some(x => x.text.includes('已完成重启')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  assert.ok(f.sends.some(x => x.text.includes('已完成重启')));
+  assert.equal((await readRestartTicket(file)).phase, 'notified');
+});
+
+test('/restart refuses untrusted senders and missing Desktop main process', async t => {
+  const launched = [];
+  const f = await fixture(t, { desktopRestart: {
+    async inspect() { throw new Error('desktop-main-process-not-unique'); },
+    async launch(path) { launched.push(path); },
+  } });
+  await f.handle.handleInbound(message('/restart', 'untrusted-id', 'stranger'));
+  assert.equal(f.sends.length, 0);
+  await f.handle.handleInbound(message('/restart', 'owner-id'));
+  assert.equal(launched.length, 0);
+  assert.ok(f.sends.some(x => x.text.includes('未执行重启')));
+  assert.equal(f.prompts.length, 0);
+});
+
+test('/restart request is idempotent and the helper launch error never claims success', async t => {
+  const f = await fixture(t, { desktopRestart: {
+    async inspect() { return { pid: 101, exePath: 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe' }; },
+    async launch() { throw new Error('simulated-launch-error'); },
+  } });
+  await f.handle.handleInbound(message('/restart', 'launch-fail-id'));
+  assert.ok(f.sends.some(x => x.text.includes('无法启动')));
+  assert.equal((await readRestartTicket(restartTicketPath(f.stateDir, 'bot'))).phase, 'failed');
+  assert.equal(f.sends.some(x => x.text.includes('已完成重启')), false);
+});
+
+test('restart completion from a saved ticket goes only to its bound owner and sends once', async t => {
+  const now = Date.now();
+  const f = await fixture(t, { desktopRestart: {
+    async inspect() { return { pid: 22, exePath: 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe' }; },
+    async launch() { throw new Error('should-not-launch'); },
+  } });
+  const file = restartTicketPath(f.stateDir, 'bot');
+  await writeRestartTicket(file, {
+    version: 1, requestId: '00000000-0000-4000-8000-000000000000',
+    botId: 'bot', userId: 'stranger', phase: 'restarted', requestedAt: now,
+    expiresAt: now + 100_000, oldMainPid: 12, newMainPid: 22,
+  });
+  await f.handle.stop();
+  await f.handle.start();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(f.sends.filter(x => x.text.includes('已完成重启')).length, 0);
+});
 
 test('all existing non-archived chats are registered automatically and start enabled', async t => {
   const f = await fixture(t);
@@ -372,7 +455,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.2');
+  assert.equal(response.version, '0.4.3');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

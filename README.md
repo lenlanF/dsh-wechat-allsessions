@@ -1,12 +1,18 @@
 # 微信助手（dsh-wechat-allsessions）
 
-**v0.4.2 · DeepSeek Harness 微信 iLink 插件**
+**v0.4.3 · DeepSeek Harness 微信 iLink 插件**
 
 微信助手默认把 DSH **全部已有的未归档对话**与微信自动关联，新建对话也自动加入；每个对话默认开启广播。每条广播**最开头**固定显示会话 ID 和会话标题。插件设置页和微信命令都可独立开关指定对话的广播，重启后保留。
 
 为兼容旧版数据，原 npm 包名、插件标识、配置命名空间、HTTP 接口前缀及 GitHub 仓库名称仍为 **dsh-wechat-allsessions**。**微信助手只是显示名称，不要将 Cordis ID 修改成中文。**
 
 ## 核心功能
+
+### 0.4.3 微信远程重启 DSH Desktop
+
+微信发送 **/restart**，微信助手首先校验发送者必须是已绑定账号本人或显式受信任的用户，然后确认本机正在运行的 DeepSeek Harness Desktop 主进程。它先回复“正在重启”，把请求及回执目标持久化，随后调用随插件发行的 Windows 一次性重启监护程序。监护程序只针对独立、可确认的 Desktop 主进程，核实其安装包存在，停止旧 Desktop 主进程并启动**同一 exe**，等待新主进程出现。新 Host 加载微信助手后，会读取持久请求；确认已是不同的主进程 ID、账号和回信上下文可用，才会向微信发送“✅ DSH Desktop 已完成重启”。
+
+**技术限制**：DSH Desktop v0.2.2-rc.3 的原生 app.relaunch() 入口仅属于 Electron 主进程；开发菜单由 !app.isPackaged 控制，正式安装版并未向 Host 插件开放此接口。微信助手不修改 DSH 官方安装文件，也不宣称调用了不存在的 IPC。Windows 重启监护逻辑随插件打包（scripts/restart-desktop.ps1），无须另装程序。由于无法调用原生平滑重启入口，当前实现会**强制终止旧 Desktop 主进程**并启动原安装程序，而非正常 app.relaunch()，可能使运行中的任务或未保存内容中断，只应在需要时发送 /restart。
 
 ### 0.4.2 设置页自适应布局与账号移除
 

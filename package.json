@@ -1,12 +1,12 @@
 {
   "name": "dsh-wechat-allsessions",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "微信助手：自动绑定并广播 DSH 未归档会话，支持微信端与插件内按对话管理广播和续接对话。",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "files": [
-    "lib",
+    "lib",    "scripts",
     "third_party",
     "docs",
     "cordis.patch.yml",
@@ -18,7 +18,7 @@
     ".": "./lib/index.js",
     "./transport": "./lib/transport.js",
     "./router": "./lib/router.js",
-    "./text": "./lib/text.js",
+    "./text": "./lib/text.js",    "./restart": "./lib/restart.js",
     "./events": "./lib/events.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
