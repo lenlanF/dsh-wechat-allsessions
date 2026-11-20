@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { RESTART_TTL_MS, restartTicketPath, readRestartTicket, writeRestartTicket,// Native driver errors are intentionally normalized before sending to WeChat.
   ticketActive, ticketReadyToNotify, createDesktopRestartDriver } from '../lib/restart.js';
@@ -179,6 +180,40 @@ test('Windows Desktop root preflight exposes fixed error codes without private d
       return true;
     });
   }
+});
+
+test('native helper distinguishes PID reuse and parent changes by process creation time', async t => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only native process identity test');
+    return;
+  }
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const exe = new URL('../bin/win-x64/dsh-wechat-restart.exe', import.meta.url);
+  const { stdout } = await promisify(execFile)(
+    fileURLToPath(exe), ['--probe-identity', String(process.pid)],
+    { windowsHide: true, timeout: 15000, maxBuffer: 4096 });
+  const result = JSON.parse(stdout.trim());
+  assert.deepEqual(result, {
+    safeIdentity: true,
+    parentChangeHarmless: true,
+    pidReuseRejected: true,
+    pathMismatchRejected: true,
+  });
+});
+
+test('snapshot cleanup checks creation time, current process handle and late child residue', async () => {
+  const source = await readFile(new URL('../scripts/windows/desktop-restart-native.cs', import.meta.url), 'utf8');
+  assert.ok(source.includes('CreatedAtDmtf'));
+  assert.ok(source.includes('ManagementDateTimeConverter.ToDateTime'));
+  assert.ok(source.includes('ProcessHandleMatches(entry, process)'));
+  assert.ok(source.includes('IsOriginalInstanceAlive(entry)'));
+  assert.ok(source.includes('GetDesktopProcesses(exePath).Count > 0'));
+  assert.ok(source.includes('oldTreeInstances'));
+  assert.ok(source.includes('oldMainCreatedAt'));
+  assert.ok(source.includes('desktop-main-identity-changed'));
+  assert.ok(source.includes('old-desktop-process-residue'));
+  assert.equal(source.includes('current.ParentPid != entry.ParentPid'), false);
 });
 
 test('native helper atomically persists restart tickets and verifies a single executable process tree', async () => {

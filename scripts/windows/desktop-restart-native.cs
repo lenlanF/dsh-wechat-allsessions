@@ -17,6 +17,7 @@ namespace DshWechatRestart {
     public int Pid;
     public int ParentPid;
     public string Path;
+    public string CreatedAtDmtf;
     public int Depth;
   }
 
@@ -83,6 +84,7 @@ namespace DshWechatRestart {
         if (mode == "--cleanup" && args.Length == 2) return Cleanup(args[1]);
         if (mode == "--probe-task" && args.Length == 2) return ProbeTask(args[1], 0);
         if (mode == "--probe-task-high" && args.Length == 2) return ProbeTask(args[1], 1);
+        if (mode == "--probe-identity" && args.Length == 2) return ProbeIdentity(args[1]);
         if (mode == "--probe-long" && args.Length == 3) return ProbeLong(args[1], args[2]);
         if (mode == "--probe-self-delete" && args.Length == 3) return ProbeSelfDelete(args[1], args[2]);
         return Fail("invalid-arguments", 2);
@@ -156,7 +158,7 @@ namespace DshWechatRestart {
     private static List<DesktopProcess> GetDesktopProcesses(string exactPath) {
       List<DesktopProcess> result = new List<DesktopProcess>();
       using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-        "SELECT ProcessId, ParentProcessId, ExecutablePath FROM Win32_Process WHERE Name = '" + DesktopName + "'")) {
+        "SELECT ProcessId, ParentProcessId, ExecutablePath, CreationDate FROM Win32_Process WHERE Name = '" + DesktopName + "'")) {
         using (ManagementObjectCollection rows = searcher.Get()) {
           foreach (ManagementObject row in rows) {
             string path = row["ExecutablePath"] == null ? "" : Convert.ToString(row["ExecutablePath"]);
@@ -165,7 +167,8 @@ namespace DshWechatRestart {
             result.Add(new DesktopProcess {
               Pid = Convert.ToInt32(row["ProcessId"]),
               ParentPid = Convert.ToInt32(row["ParentProcessId"]),
-              Path = path
+              Path = path,
+              CreatedAtDmtf = row["CreationDate"] == null ? "" : Convert.ToString(row["CreationDate"])
             });
           }
         }
@@ -212,13 +215,14 @@ namespace DshWechatRestart {
 
     private static DesktopProcess GetProcess(int pid) {
       using (ManagementObjectSearcher searcher = new ManagementObjectSearcher(
-        "SELECT ProcessId, ParentProcessId, ExecutablePath FROM Win32_Process WHERE ProcessId = " + pid)) {
+        "SELECT ProcessId, ParentProcessId, ExecutablePath, CreationDate FROM Win32_Process WHERE ProcessId = " + pid)) {
         using (ManagementObjectCollection rows = searcher.Get()) {
           foreach (ManagementObject row in rows) {
             return new DesktopProcess {
               Pid = Convert.ToInt32(row["ProcessId"]),
               ParentPid = Convert.ToInt32(row["ParentProcessId"]),
-              Path = row["ExecutablePath"] == null ? "" : Convert.ToString(row["ExecutablePath"])
+              Path = row["ExecutablePath"] == null ? "" : Convert.ToString(row["ExecutablePath"]),
+              CreatedAtDmtf = row["CreationDate"] == null ? "" : Convert.ToString(row["CreationDate"])
             };
           }
         }
@@ -374,6 +378,40 @@ namespace DshWechatRestart {
       DeleteTask(CleanupTaskName(requestId));
     }
 
+    // Read-only native regression probe. Never creates or stops processes.
+    private static int ProbeIdentity(string pidText) {
+      int pid;
+      if (!Int32.TryParse(pidText, out pid) || pid <= 0)
+        return Fail("invalid-probe-pid", 61);
+      DesktopProcess current = GetProcess(pid);
+      if (current == null || String.IsNullOrEmpty(current.CreatedAtDmtf))
+        return Fail("probe-process-unavailable", 62);
+      DesktopProcess parentChanged = new DesktopProcess {
+        Pid = current.Pid, ParentPid = current.ParentPid + 1,
+        Path = current.Path, CreatedAtDmtf = current.CreatedAtDmtf
+      };
+      DesktopProcess reusedPid = new DesktopProcess {
+        Pid = current.Pid, ParentPid = current.ParentPid,
+        Path = current.Path, CreatedAtDmtf = "20000101000000.000000+000"
+      };
+      DesktopProcess wrongPath = new DesktopProcess {
+        Pid = current.Pid, ParentPid = current.ParentPid,
+        Path = current.Path + ".not-the-same", CreatedAtDmtf = current.CreatedAtDmtf
+      };
+      bool valid = IsSameDesktopInstance(current, GetProcess(pid))
+        && IsSameDesktopInstance(parentChanged, current)
+        && !IsSameDesktopInstance(reusedPid, current)
+        && !IsSameDesktopInstance(wrongPath, current);
+      using (Process handle = Process.GetProcessById(pid)) {
+        valid = valid && ProcessHandleMatches(current, handle);
+      }
+      Output(new Dictionary<string, object> {
+        { "safeIdentity", valid }, { "parentChangeHarmless", true },
+        { "pidReuseRejected", true }, { "pathMismatchRejected", true }
+      });
+      return valid ? 0 : 63;
+    }
+
     private static int Schedule(string ticketPath) {
       Dictionary<string, object> ticket = ReadTicket(ticketPath);
       if (Text(ticket, "phase") != "armed" || Number(ticket, "expiresAt") <= UtcMs())
@@ -389,6 +427,7 @@ namespace DshWechatRestart {
           throw new InvalidOperationException("desktop-main-changed");
         int runLevel = IsProcessElevated(target.Pid) ? 1 : 0;
         Put(ticket, "oldMainElevated", runLevel);
+        Put(ticket, "oldMainCreatedAt", target.CreatedAtDmtf);
         WriteTicket(ticketPath, ticket);
         RegisterTask(name, HelperPath, "--execute \"" + ticketPath + "\"",
           null, "PT5M", true, runLevel);
@@ -427,37 +466,66 @@ namespace DshWechatRestart {
       return item != null && String.Equals(item.Path, exePath, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsSameDesktopInstance(DesktopProcess expected, DesktopProcess current) {
+      if (current == null) return false;
+      // Windows can reuse a PID. ParentProcessId is not a reliable identity
+      // after a parent exits, and ExecutablePath alone is insufficient.
+      if (String.IsNullOrEmpty(expected.CreatedAtDmtf) ||
+          String.IsNullOrEmpty(current.CreatedAtDmtf))
+        throw new InvalidOperationException("desktop-creation-time-unavailable");
+      return expected.Pid == current.Pid
+        && String.Equals(expected.Path, current.Path, StringComparison.OrdinalIgnoreCase)
+        && String.Equals(expected.CreatedAtDmtf, current.CreatedAtDmtf, StringComparison.Ordinal);
+    }
+
+    private static bool IsOriginalInstanceAlive(DesktopProcess expected) {
+      return IsSameDesktopInstance(expected, GetProcess(expected.Pid));
+    }
+
+    private static bool ProcessHandleMatches(DesktopProcess expected, Process process) {
+      if (String.IsNullOrEmpty(expected.CreatedAtDmtf))
+        throw new InvalidOperationException("desktop-creation-time-unavailable");
+      DateTime expectedUtc = ManagementDateTimeConverter.ToDateTime(
+        expected.CreatedAtDmtf).ToUniversalTime();
+      DateTime handleUtc = process.StartTime.ToUniversalTime();
+      return Math.Abs((expectedUtc - handleUtc).TotalSeconds) < 2;
+    }
+
     private static void StopDesktopTree(List<DesktopProcess> tree, string exePath) {
       foreach (DesktopProcess entry in tree) {
-        // Renderer/utility children can exit spontaneously during a shutdown.
-        // Only ignore a termination race if the exact old executable PID is
-        // no longer alive; an access-denied error must always remain fatal.
-        DesktopProcess current = GetProcess(entry.Pid);
-        if (current == null) continue;
-        if (!String.Equals(current.Path, exePath, StringComparison.OrdinalIgnoreCase)
-          || current.ParentPid != entry.ParentPid)
-          throw new InvalidOperationException("desktop-process-changed");
+        // Electron renderers exit or respawn while shutting down. Kill only the
+        // exact process from the original snapshot, never a reused PID.
+        if (!IsOriginalInstanceAlive(entry)) continue;
         try {
           using (Process process = Process.GetProcessById(entry.Pid)) {
             if (process.HasExited) continue;
+            // Force the Process handle open and compare its own creation time
+            // before Kill(), so PID reuse between WMI lookups cannot kill an
+            // unrelated process.
+            if (!ProcessHandleMatches(entry, process)) continue;
+            if (!IsOriginalInstanceAlive(entry)) continue;
             process.Kill();
-            if (!process.WaitForExit(10000) && IsOldProcessAlive(entry.Pid, exePath))
+            if (!process.WaitForExit(10000) && IsOriginalInstanceAlive(entry))
               throw new InvalidOperationException("desktop-process-stop-timeout");
           }
         } catch (ArgumentException) {
-          if (IsOldProcessAlive(entry.Pid, exePath))
+          if (IsOriginalInstanceAlive(entry))
             throw new InvalidOperationException("desktop-process-stop-race");
         } catch (InvalidOperationException) {
-          if (IsOldProcessAlive(entry.Pid, exePath)) throw;
+          if (IsOriginalInstanceAlive(entry)) throw;
         } catch (System.ComponentModel.Win32Exception) {
-          if (IsOldProcessAlive(entry.Pid, exePath))
+          if (IsOriginalInstanceAlive(entry))
             throw new InvalidOperationException("desktop-process-stop-denied");
         }
       }
       DateTime deadline = DateTime.UtcNow.AddSeconds(20);
       while (DateTime.UtcNow < deadline) {
-        bool any = tree.Any(p => IsOldProcessAlive(p.Pid, exePath));
-        if (!any) return;
+        bool oldAlive = tree.Any(p => IsOriginalInstanceAlive(p));
+        // The old main can create new renderer processes during shutdown;
+        // do not start a second Desktop while any same-installation process
+        // is still present, even if it was absent from the first snapshot.
+        bool installationResidue = GetDesktopProcesses(exePath).Count > 0;
+        if (!oldAlive && !installationResidue) return;
         Thread.Sleep(200);
       }
       throw new InvalidOperationException("old-desktop-process-residue");
@@ -513,6 +581,11 @@ namespace DshWechatRestart {
         RegisterTask(cleanupName, HelperPath, "--cleanup " + requestId,
           DateTime.Now.AddMinutes(3), "PT30S", false, (int)Number(ticket, "oldMainElevated"));
       }
+      // Refuse to start another copy while an orphan of the old installation
+      // is still alive. If a healthy new root exists, reuse it instead.
+      List<DesktopProcess> leftover = GetDesktopProcesses(exePath);
+      if (leftover.Count > 0)
+        throw new InvalidOperationException("old-desktop-process-residue");
       if (!TaskExists(desktopName)) {
         RegisterTask(desktopName, exePath, "", null, "PT0S", true,
           (int)Number(ticket, "oldMainElevated"));
@@ -534,8 +607,9 @@ namespace DshWechatRestart {
         requestId = Text(ticket, "requestId");
         DesktopProcess original = GetDesktopMain(Text(ticket, "exePath"));
         if (original.Pid != Number(ticket, "oldMainPid")
-          || !String.Equals(original.Path, Text(ticket, "exePath"), StringComparison.OrdinalIgnoreCase))
-          throw new InvalidOperationException("desktop-process-changed");
+          || !String.Equals(original.Path, Text(ticket, "exePath"), StringComparison.OrdinalIgnoreCase)
+          || !String.Equals(original.CreatedAtDmtf, Text(ticket, "oldMainCreatedAt"), StringComparison.Ordinal))
+          throw new InvalidOperationException("desktop-main-identity-changed");
         if (IsProcessElevated(original.Pid) && !IsProcessElevated(Process.GetCurrentProcess().Id))
           throw new InvalidOperationException("desktop-worker-elevation-mismatch");
         Put(ticket, "phase", "executing");
@@ -547,9 +621,14 @@ namespace DshWechatRestart {
         if (Text(ticket, "phase") != "executing" || Number(ticket, "expiresAt") <= UtcMs())
           throw new InvalidOperationException("restart-request-cancelled");
         original = GetDesktopMain(Text(ticket, "exePath"));
-        if (original.Pid != Number(ticket, "oldMainPid")) throw new InvalidOperationException("desktop-process-changed");
+        if (original.Pid != Number(ticket, "oldMainPid")
+          || !String.Equals(original.CreatedAtDmtf, Text(ticket, "oldMainCreatedAt"), StringComparison.Ordinal))
+          throw new InvalidOperationException("desktop-main-identity-changed");
         List<DesktopProcess> tree = GetDesktopTree(original.Pid, original.Path);
         Put(ticket, "oldTreePids", tree.Select(p => p.Pid).ToArray());
+        Put(ticket, "oldTreeInstances", tree.Select(p => new Dictionary<string, object> {
+          { "pid", p.Pid }, { "createdAt", p.CreatedAtDmtf }
+        }).ToArray());
         WriteTicket(ticketPath, ticket);
         StopDesktopTree(tree, original.Path);
         int newPid;
@@ -621,14 +700,29 @@ namespace DshWechatRestart {
         if (main.Pid != Number(ticket, "newMainPid") || main.Pid == Number(ticket, "oldMainPid")
           || !String.Equals(main.Path, Text(ticket, "exePath"), StringComparison.OrdinalIgnoreCase))
           return Fail("desktop-main-mismatch", 32);
-        object pids;
-        if (ticket.TryGetValue("oldTreePids", out pids) && pids is IEnumerable) {
-          foreach (object value in (IEnumerable)pids) {
-            int pid = Convert.ToInt32(value);
-            if (IsOldProcessAlive(pid, Text(ticket, "exePath"))) return Fail("old-desktop-process-residue", 33);
+        object instances;
+        if (ticket.TryGetValue("oldTreeInstances", out instances) && instances is IEnumerable) {
+          foreach (object item in (IEnumerable)instances) {
+            Dictionary<string, object> entry = item as Dictionary<string, object>;
+            if (entry == null) return Fail("old-process-identity-invalid", 33);
+            DesktopProcess old = new DesktopProcess {
+              Pid = Convert.ToInt32(entry["pid"]),
+              Path = Text(ticket, "exePath"),
+              CreatedAtDmtf = Convert.ToString(entry["createdAt"])
+            };
+            if (IsOriginalInstanceAlive(old))
+              return Fail("old-desktop-process-residue", 33);
           }
-        } else if (IsOldProcessAlive(Convert.ToInt32(Number(ticket, "oldMainPid")), Text(ticket, "exePath"))) {
-          return Fail("old-desktop-process-residue", 33);
+        } else {
+          object pids;
+          if (ticket.TryGetValue("oldTreePids", out pids) && pids is IEnumerable) {
+            foreach (object value in (IEnumerable)pids) {
+              if (IsOldProcessAlive(Convert.ToInt32(value), Text(ticket, "exePath")))
+                return Fail("old-desktop-process-residue", 33);
+            }
+          } else if (IsOldProcessAlive(Convert.ToInt32(Number(ticket, "oldMainPid")), Text(ticket, "exePath"))) {
+            return Fail("old-desktop-process-residue", 33);
+          }
         }
         int workerPid = Convert.ToInt32(Number(ticket, "workerPid"));
         DesktopProcess worker = workerPid > 0 ? GetProcess(workerPid) : null;
