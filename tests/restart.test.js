@@ -79,6 +79,60 @@ test('the built-in Windows restart check launches only an argument-vector PowerS
   assert.equal(args.opts.windowsHide, true);
 });
 
+test('launch waits for an independent one-time worker acknowledgement', async () => {
+  const captured = [];
+  const driver = createDesktopRestartDriver({
+    platform: 'win32',
+    execFile: async (executable, args, options) => {
+      captured.push({ executable, args, options });
+      return { stdout: '{"workerStarted":true}' };
+    },
+  });
+  await driver.launch('D:\\Temp\\request.json');
+  assert.equal(captured.length, 1);
+  assert.ok(captured[0].args.some(arg => arg.endsWith('schedule-desktop-restart.ps1')));
+  assert.ok(captured[0].args.includes('D:\\Temp\\request.json'));
+  assert.equal(captured[0].options.windowsHide, true);
+  assert.equal(captured[0].options.timeout, 22_000);
+  const fail = createDesktopRestartDriver({
+    platform: 'win32', execFile: async () => ({ stdout: '{"workerStarted":false}' }),
+  });
+  await assert.rejects(() => fail.launch('D:\\Temp\\request.json'), /restart-worker-not-started/);
+});
+
+test('cleanup verification rejects a leftover task or worker', async () => {
+  const called = [];
+  const driver = createDesktopRestartDriver({
+    platform: 'win32',
+    execFile: async (_program, argv) => {
+      called.push(argv);
+      return { stdout: '{"clean":true}' };
+    },
+  });
+  assert.equal(await driver.verifyClean('D:\\Temp\\request.json'), true);
+  assert.ok(called[0].includes('CheckClean'));
+  const unclean = createDesktopRestartDriver({
+    platform: 'win32', execFile: async () => ({ stdout: '{"clean":false}' }),
+  });
+  await assert.rejects(() => unclean.verifyClean('D:\\Temp\\request.json'), /cleanup-unverified/);
+});
+
+test('scheduled restart is on-demand with no triggers, repetition, escalation or permanent worker', async () => {
+  const scheduler = await readFile(new URL('../scripts/schedule-desktop-restart.ps1', import.meta.url), 'utf8');
+  const worker = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
+  assert.ok(scheduler.includes('Schedule.Service'));
+  assert.ok(scheduler.includes('AllowDemandStart'));
+  assert.doesNotMatch(scheduler, /\.Triggers\.Create\(/);
+  assert.ok(scheduler.includes('LogonType = 3'));
+  assert.ok(scheduler.includes('RunLevel = 0'));
+  assert.ok(worker.includes('Remove-ScheduledTask'));
+  assert.ok(worker.indexOf('Remove-ScheduledTask\n  Write-Ticket $ticket')
+    < worker.indexOf('Stop-Process -Id $entry.pid'));
+  assert.ok(worker.includes('old-desktop-process-residue'));
+  assert.ok(worker.includes("CheckClean"));
+  assert.doesNotMatch(worker, /^\s*taskkill\b/m);
+});
+
 test('Windows Desktop root preflight exposes fixed error codes without private data', async () => {
   const causes = [
     [10, 'desktop-not-running'],

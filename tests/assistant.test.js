@@ -101,7 +101,7 @@ test('/restart is handled by the plugin with a durable ticket and does not submi
   const f = await fixture(t, { desktopRestart: driver, restartMonitorMs: 30 });
   await f.handle.handleInbound(message('/restart', 'restart-id-1'));
   assert.equal(f.prompts.length, 0);
-  assert.ok(f.sends.some(x => x.text.includes('正在重启 DSH Desktop')));
+  assert.ok(f.sends.some(x => x.text.includes('正在启动一次性重启任务')));
   assert.ok(f.sends.every(x => !x.text.includes('已完成重启')));
   assert.equal(launched.length, 1);
   const file = restartTicketPath(f.stateDir, 'bot');
@@ -149,7 +149,7 @@ test('/restart request is idempotent and the helper launch error never claims su
     async launch() { throw new Error('simulated-launch-error'); },
   } });
   await f.handle.handleInbound(message('/restart', 'launch-fail-id'));
-  assert.ok(f.sends.some(x => x.text.includes('无法启动')));
+  assert.ok(f.sends.some(x => x.text.includes('未能确认启动')));
   assert.equal((await readRestartTicket(restartTicketPath(f.stateDir, 'bot'))).phase, 'failed');
   assert.equal(f.sends.some(x => x.text.includes('已完成重启')), false);
 });
@@ -176,6 +176,57 @@ test('new Host reconciles an armed ticket after the old Desktop PID has exited',
   }
   assert.equal(f.sends.filter(s => s.text.includes('已完成重启')).length, 1);
   assert.equal((await readRestartTicket(file)).phase, 'notified');
+});
+
+test('restart notification waits for one-shot task and old-process cleanup', async t => {
+  const now = Date.now();
+  const executable = 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe';
+  let clean = false;
+  let checks = 0;
+  const f = await fixture(t, { desktopRestart: {
+    async inspect() { return { pid: 333, exePath: executable }; },
+    async launch() { throw new Error('should not start again'); },
+    async verifyClean() { checks += 1; if (!clean) throw new Error('temporary task still active'); },
+  }, restartMonitorMs: 30 });
+  const file = restartTicketPath(f.stateDir, 'bot');
+  await writeRestartTicket(file, {
+    version: 1, requestId: '00000000-0000-4000-8000-000000000002',
+    botId: 'bot', userId: 'owner', phase: 'restarted',
+    requestedAt: now, expiresAt: now + 100_000,
+    oldMainPid: 111, newMainPid: 333, exePath: executable,
+  });
+  await f.handle.stop();
+  await f.handle.start();
+  await new Promise(resolve => setTimeout(resolve, 260));
+  assert.ok(checks > 0);
+  assert.equal(f.sends.some(s => s.text.includes('已完成重启')), false);
+  assert.equal((await readRestartTicket(file)).phase, 'restarted');
+  clean = true;
+  const deadline = Date.now() + 3000;
+  while (!f.sends.some(s => s.text.includes('已完成重启')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 45));
+  }
+  assert.equal(f.sends.filter(s => s.text.includes('已完成重启')).length, 1);
+  assert.equal((await readRestartTicket(file)).phase, 'notified');
+});
+
+test('executing restart ticket remains active and blocks a duplicate /restart', async t => {
+  const now = Date.now();
+  const executable = 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe';
+  const f = await fixture(t, { desktopRestart: {
+    async inspect() { return { pid: 111, exePath: executable }; },
+    async launch() { throw new Error('unexpected duplicate worker'); },
+  } });
+  const file = restartTicketPath(f.stateDir, 'bot');
+  await writeRestartTicket(file, {
+    version: 1, requestId: '00000000-0000-4000-8000-000000000003',
+    botId: 'bot', userId: 'owner', phase: 'executing',
+    requestedAt: now, expiresAt: now + 100_000,
+    oldMainPid: 111, newMainPid: null, exePath: executable,
+  });
+  await f.handle.handleInbound(message('/restart', 'duplicate-executing'));
+  assert.ok(f.sends.some(s => s.text.includes('不会重复重启')));
+  assert.equal((await readRestartTicket(file)).phase, 'executing');
 });
 
 test('restart completion from a saved ticket goes only to its bound owner and sends once', async t => {
@@ -479,7 +530,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.5');
+  assert.equal(response.version, '0.4.6');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

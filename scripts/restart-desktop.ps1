@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-  [ValidateSet('Check', 'Execute')]
+  [ValidateSet('Check', 'CheckClean', 'Execute')]
   [string] $Mode = 'Check',
   [string] $TicketPath = ''
 )
@@ -88,6 +88,25 @@ function Write-Ticket([object] $item) {
   }
 }
 
+function Remove-ScheduledTask {
+  # Delete the on-demand task as soon as the isolated worker starts. This
+  # prevents persistent tasks even if Desktop shuts down or the worker crashes.
+  if ($null -eq $ticket -or $ticket.requestId -notmatch '^[0-9a-f-]{36}$') { return }
+  $taskName = 'DSHWechatRestart-' + $ticket.requestId
+  try {
+    $service = New-Object -ComObject Schedule.Service
+    $service.Connect()
+    $root = $service.GetFolder('\')
+    try { $null = $root.GetTask($taskName) } catch { return }
+    $root.DeleteTask($taskName, 0)
+    $found = @($root.GetTasks(0) | Where-Object { $_.Name -eq $taskName })
+    if ($found.Count -gt 0) { throw 'restart-scheduled-task-still-present' }
+  } catch {
+    # Fail closed. Do not kill Desktop when cleanup cannot be guaranteed.
+    throw 'restart-scheduled-task-cleanup-failed'
+  }
+}
+
 if ($Mode -eq 'Check') {
   try {
     $main = Get-DesktopMain
@@ -112,6 +131,43 @@ if ([string]::IsNullOrWhiteSpace($TicketPath) -or -not [IO.Path]::IsPathRooted($
   exit 4
 }
 
+if ($Mode -eq 'CheckClean') {
+  try {
+    $ticket = Get-Content -LiteralPath $TicketPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($ticket.version -ne 1 -or $ticket.requestId -notmatch '^[0-9a-f-]{36}$' -or
+        $ticket.phase -notin @('restarted','notified')) { exit 30 }
+    $main = Get-DesktopMain
+    if ($main.pid -ne [int]$ticket.newMainPid -or
+        $main.pid -eq [int]$ticket.oldMainPid -or
+        $main.exePath -ne [string]$ticket.exePath) { exit 31 }
+    # The new root may have legitimate Electron children, but every old
+    # instance must be gone and there may be only one unique DSH root.
+    $oldPids = if ($ticket.PSObject.Properties['oldTreePids']) { @($ticket.oldTreePids) }
+      else { @($ticket.oldMainPid) }
+    foreach ($oldPid in $oldPids) {
+      $remaining = Get-CimInstance Win32_Process -Filter ("ProcessId = " + [int]$oldPid)
+      if ($remaining -and $remaining.ExecutablePath -eq [string]$ticket.exePath) { exit 32 }
+    }
+    $service = New-Object -ComObject Schedule.Service
+    $service.Connect()
+    $root = $service.GetFolder('\')
+    $leftover = @($root.GetTasks(0) | Where-Object {
+      $_.Name -eq ('DSHWechatRestart-' + $ticket.requestId)
+    })
+    if ($leftover.Count -gt 0) { exit 33 }
+    $workers = @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+      Where-Object {
+        $_.CommandLine -and $_.CommandLine.Contains('restart-desktop.ps1') -and
+        $_.CommandLine.Contains('-Mode Execute') -and
+        $_.CommandLine.Contains($TicketPath)
+      })
+    if ($workers.Count -gt 0) { exit 34 }
+    [pscustomobject]@{ clean = $true; rootPid = [int]$main.pid } |
+      ConvertTo-Json -Compress
+    exit 0
+  } catch { exit 35 }
+}
+
 try {
   $ticket = Get-Content -LiteralPath $TicketPath -Raw -Encoding UTF8 | ConvertFrom-Json
   if ($ticket.phase -ne 'armed' -or $ticket.version -ne 1 -or
@@ -127,9 +183,27 @@ try {
     throw 'desktop-process-changed'
   }
 
-  # Give the incoming /restart handler time to persist its getUpdates cursor,
-  # after the WeChat "正在重启" acknowledgement has been sent.
+  # A ticket claim proves this worker was started by an independent process.
+  # The scheduling caller waits for this heartbeat before reporting launch.
+  $ticket.phase = 'executing'
+  $ticket | Add-Member -NotePropertyName workerStartedAt -NotePropertyValue (
+    [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Force
+  # Unregister the one-shot task BEFORE exposing an executing claim.  The
+  # caller cannot acknowledge a worker until task cleanup is verified.
+  Remove-ScheduledTask
+  Write-Ticket $ticket
+
+  # Give the incoming /restart handler time to persist getUpdates cursor,
+  # after the WeChat acceptance message has been sent.
   Start-Sleep -Milliseconds 1500
+  # If scheduling timed out or the request was cancelled after the claim,
+  # do not stop Desktop even if this worker was delayed.
+  $latest = Get-Content -LiteralPath $TicketPath -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($latest.requestId -ne $ticket.requestId -or $latest.phase -ne 'executing' -or
+      $latest.expiresAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) {
+    throw 'restart-request-cancelled-or-expired'
+  }
+
   $original = Get-DesktopMain
   if ($original.pid -ne [int]$ticket.oldMainPid) { throw 'desktop-process-changed' }
 
@@ -138,6 +212,10 @@ try {
   # root when the new main process starts. Never use taskkill /T: that could
   # terminate this separate watchdog along with the Desktop process.
   $tree = @(Get-DesktopTree ([int]$ticket.oldMainPid) ([string]$ticket.exePath))
+  $ticket | Add-Member -NotePropertyName oldTreePids -NotePropertyValue (
+    @($tree | ForEach-Object { [int]$_.pid })) -Force
+  Write-Ticket $ticket
+
   foreach ($entry in $tree) {
     $current = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $entry.pid)
     if (-not $current) { continue }
@@ -164,6 +242,19 @@ try {
     Start-Sleep -Milliseconds 500
   }
   if (-not $stopped) { throw 'desktop-main-did-not-stop' }
+
+  # Wait for all OLD Desktop executable processes to leave before creating
+  # another instance. Other process families are intentionally untouched.
+  $remainingOld = @()
+  for ($i = 0; $i -lt 30; $i++) {
+    $remainingOld = @($tree | Where-Object {
+      $candidate = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $_.pid)
+      $candidate -and $candidate.ExecutablePath -eq [string] $ticket.exePath
+    })
+    if ($remainingOld.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 200
+  }
+  if ($remainingOld.Count -gt 0) { throw 'old-desktop-process-residue' }
 
   $exe = [string] $ticket.exePath
   $newMainPid = 0
@@ -199,13 +290,14 @@ try {
   if ($newMainPid -le 0) { throw 'desktop-new-main-not-detected' }
   $ticket.phase = 'restarted'
   $ticket.newMainPid = [int]$newMainPid
-  $ticket.finishedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $ticket | Add-Member -NotePropertyName finishedAt -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Force
   Write-Ticket $ticket
+  Remove-ScheduledTask
   exit 0
 } catch {
   try {
     $ticket = Get-Content -LiteralPath $TicketPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($ticket.phase -eq 'armed') {
+    if ($ticket.phase -eq 'armed' -or $ticket.phase -eq 'executing') {
       $oldAlive = [bool](Get-Process -Id ([int]$ticket.oldMainPid) -ErrorAction SilentlyContinue)
       $replacement = $null
       if (-not $oldAlive) {
@@ -219,11 +311,12 @@ try {
         $ticket.newMainPid = [int]$replacement.pid
       } else {
         $ticket.phase = 'failed'
-        $ticket.failureCode = 'desktop-restart-failed'
+        $ticket | Add-Member -NotePropertyName failureCode -NotePropertyValue 'desktop-restart-failed' -Force
       }
-      $ticket.finishedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+      $ticket | Add-Member -NotePropertyName finishedAt -NotePropertyValue ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Force
       Write-Ticket $ticket
     }
   } catch { }
+  Remove-ScheduledTask
   exit 5
 }
