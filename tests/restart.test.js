@@ -105,6 +105,14 @@ test('Windows Desktop root preflight exposes fixed error codes without private d
   }
 });
 
+test('Windows restart script writes tickets with nonempty atomic backup paths', async () => {
+  const source = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
+  assert.match(source, /\[IO\.File\]::Replace\(\$tmp,\s*\$TicketPath,\s*\$backup\)/);
+  assert.ok(source.includes("worker-"));
+  assert.match(source, /if \(Test-Path -LiteralPath \$backup\)/);
+  assert.doesNotMatch(source, /\[IO\.File\]::Replace\(\$tmp,\s*\$TicketPath,\s*\$null\)/);
+});
+
 test('shipped PowerShell driver selects root by parent PID and stops only verified executable subtree', async () => {
   const source = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
   assert.match(source, /ParentProcessId/);

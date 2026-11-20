@@ -154,6 +154,30 @@ test('/restart request is idempotent and the helper launch error never claims su
   assert.equal(f.sends.some(x => x.text.includes('已完成重启')), false);
 });
 
+test('new Host reconciles an armed ticket after the old Desktop PID has exited', async t => {
+  const now = Date.now();
+  const executable = 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe';
+  const f = await fixture(t, { desktopRestart: {
+    async inspect() { return { pid: 456, exePath: executable }; },
+    async launch() { throw new Error('should not launch'); },
+  }, restartMonitorMs: 30 });
+  const file = restartTicketPath(f.stateDir, 'bot');
+  await writeRestartTicket(file, {
+    version: 1, requestId: '00000000-0000-4000-8000-000000000001',
+    botId: 'bot', userId: 'owner', phase: 'armed',
+    requestedAt: now, expiresAt: now + 100_000,
+    oldMainPid: 99999998, newMainPid: null, exePath: executable,
+  });
+  await f.handle.stop();
+  await f.handle.start();
+  const deadline = Date.now() + 3_000;
+  while (!f.sends.some(s => s.text.includes('已完成重启')) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 40));
+  }
+  assert.equal(f.sends.filter(s => s.text.includes('已完成重启')).length, 1);
+  assert.equal((await readRestartTicket(file)).phase, 'notified');
+});
+
 test('restart completion from a saved ticket goes only to its bound owner and sends once', async t => {
   const now = Date.now();
   const f = await fixture(t, { desktopRestart: {
@@ -455,7 +479,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.4');
+  assert.equal(response.version, '0.4.5');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

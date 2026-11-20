@@ -70,12 +70,21 @@ function Get-DesktopTree([int] $mainPid, [string] $exePath) {
 
 function Write-Ticket([object] $item) {
   $json = $item | ConvertTo-Json -Depth 5 -Compress
-  $tmp = $TicketPath + '.worker-' + [guid]::NewGuid().ToString('N') + '.tmp'
+  $suffix = [guid]::NewGuid().ToString('N')
+  $tmp = $TicketPath + '.worker-' + $suffix + '.tmp'
+  $backup = $TicketPath + '.worker-' + $suffix + '.bak'
   try {
+    # Do not overwrite a completion that the new Host already acknowledged.
+    $current = Get-Content -LiteralPath $TicketPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($current.requestId -eq $item.requestId -and $current.phase -eq 'notified' -and
+        $item.phase -eq 'restarted') { return }
     [IO.File]::WriteAllText($tmp, $json, (New-Object Text.UTF8Encoding($false)))
-    [IO.File]::Replace($tmp, $TicketPath, $null)
+    # .NET Framework on Windows requires a nonempty backupFileName.
+    # A null backup path fails with "The path is empty".
+    [IO.File]::Replace($tmp, $TicketPath, $backup)
   } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue }
   }
 }
 
@@ -131,15 +140,20 @@ try {
   $tree = @(Get-DesktopTree ([int]$ticket.oldMainPid) ([string]$ticket.exePath))
   foreach ($entry in $tree) {
     $current = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $entry.pid)
-    if (-not $current) {
-      if ($entry.pid -eq [int]$ticket.oldMainPid) { throw 'desktop-main-already-exited' }
-      continue
-    }
+    if (-not $current) { continue }
     if ($current.ExecutablePath -ne [string]$ticket.exePath -or
         [int]$current.ParentProcessId -ne $entry.parentPid) {
       throw 'desktop-process-changed'
     }
-    Stop-Process -Id $entry.pid -Force -ErrorAction Stop
+    try {
+      Stop-Process -Id $entry.pid -Force -ErrorAction Stop
+    } catch {
+      # Child workers can exit between the CIM probe and Stop-Process.
+      # Only ignore the error if the exact PID has already disappeared.
+      if (Get-Process -Id $entry.pid -ErrorAction SilentlyContinue) {
+        throw 'desktop-process-stop-failed'
+      }
+    }
   }
   $stopped = $false
   for ($i = 0; $i -lt 60; $i++) {
@@ -151,15 +165,32 @@ try {
   }
   if (-not $stopped) { throw 'desktop-main-did-not-stop' }
 
-  $exe = [string]$ticket.exePath
-  Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Parent $exe) | Out-Null
-
+  $exe = [string] $ticket.exePath
   $newMainPid = 0
-  for ($i = 0; $i -lt 150; $i++) {
+  $oldTreePids = @($tree | ForEach-Object { [int] $_.pid })
+  # The packaged Desktop may relaunch automatically during shutdown.
+  # Reuse the genuine new root rather than launching a second instance.
+  for ($i = 0; $i -lt 10; $i++) {
+    Start-Sleep -Milliseconds 500
+    try {
+      $candidate = Get-DesktopMain
+      if ($candidate.pid -ne [int]$ticket.oldMainPid -and
+          $candidate.exePath -eq $exe -and
+          $oldTreePids -notcontains [int]$candidate.pid) {
+        $newMainPid = $candidate.pid
+        break
+      }
+    } catch { }
+  }
+  if ($newMainPid -le 0) {
+    Start-Process -FilePath $exe -WorkingDirectory (Split-Path -Parent $exe) | Out-Null
+  }
+  for ($i = 0; $i -lt 150 -and $newMainPid -le 0; $i++) {
     Start-Sleep -Milliseconds 500
     try {
       $main = Get-DesktopMain
-      if ($main.pid -ne [int]$ticket.oldMainPid -and $main.exePath -eq $exe) {
+      if ($main.pid -ne [int]$ticket.oldMainPid -and $main.exePath -eq $exe -and
+          $oldTreePids -notcontains [int]$main.pid) {
         $newMainPid = $main.pid
         break
       }
@@ -175,9 +206,21 @@ try {
   try {
     $ticket = Get-Content -LiteralPath $TicketPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($ticket.phase -eq 'armed') {
-      $ticket.phase = 'failed'
-      # Do not persist raw exceptions, process arguments or private paths.
-      $ticket.failureCode = 'desktop-restart-failed'
+      $oldAlive = [bool](Get-Process -Id ([int]$ticket.oldMainPid) -ErrorAction SilentlyContinue)
+      $replacement = $null
+      if (-not $oldAlive) {
+        try { $replacement = Get-DesktopMain } catch { }
+      }
+      if ($replacement -and $replacement.pid -ne [int]$ticket.oldMainPid -and
+          $replacement.exePath -eq [string]$ticket.exePath) {
+        # A new Desktop is already running; the Host will independently
+        # verify connectivity before it emits its completion message.
+        $ticket.phase = 'restarted'
+        $ticket.newMainPid = [int]$replacement.pid
+      } else {
+        $ticket.phase = 'failed'
+        $ticket.failureCode = 'desktop-restart-failed'
+      }
       $ticket.finishedAt = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
       Write-Ticket $ticket
     }
