@@ -1,4 +1,4 @@
-# 微信助手安装和升级（dsh-wechat-allsessions v0.4.8）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.4.9）
 
 ## 保持原配置及数据
 
@@ -8,7 +8,7 @@
 
 ## 安装
 
-可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.8，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.9，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
 ~~~yaml
 - insert:
@@ -48,6 +48,10 @@
 广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 微信消息按完整句子、行与段落安全分段，不截断 /session 会话命令。正文或单句超限时会明确告知省略，绝不发送无法使用的残缺会话 ID。
 
+## v0.4.9 实机权限兼容
+
+重启工作任务只使用与当前 DSH Desktop 根进程相同的 Windows 令牌权限级别（通过 TokenElevation 查询，不推测）。当现有 Desktop 以管理员权限运行时，工作任务和新 Desktop 启动任务也采用当前用户的最高可用权限；普通权限 Desktop 则保持普通权限。任一安全检查无法通过时拒绝结束进程。仍然只创建临时一次性任务、以 GUI 子系统辅助程序执行，不出现 CMD/PowerShell 窗口、不产生额外常驻进程。
+
 ## v0.4.8 微信启动恢复
 
 当 Desktop 完成重启但微信 \`notifyStart\` 请求偶发失败时，桥接仍必须继续进入既有的单实例 \`getUpdates\` 长轮询，而不能留下“已连接、未轮询”的半启动状态。完成回执仍须通过新 Host 的消息轮询成功、旧进程清理和临时任务清理三重检查。此修复不修改任何微信凭据和用户路由配置。
@@ -77,7 +81,7 @@ v0.4.7 的 /restart 运行链不启动 CMD 或 PowerShell。进程检查、调�
 检查安装版本不能只查看 GitHub 或源码仓库：必须核验当前 DSH Profile 下 node_modules/dsh-wechat-allsessions/package.json 版本、Host 实际加载的插件代码，并查看 /plugins/dsh-wechat-allsessions/status 的 version。若 /help 仍然进入了“最新 DSH 对话”而不是由微信助手直接回复，则当前微信消息由旧插件/其他桥接接收，排查该消费者之前不要叠加启动新的 getUpdates。状态接口新增的 sendLog.kind=wechat-command 可追踪微信命令回复发送是否成功（没有用户 ID 或敏感 token）。
 
 
-1. 检查已安装插件 package.json 版本为 0.4.8；设置页显示“微信助手”。
+1. 检查已安装插件 package.json 版本为 0.4.9；设置页显示“微信助手”。
 2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
 3. 微信发送 /help、/list 并核实对话清单与参数说明。
 4. 创建一条全新 DSH 对话，不发消息，等待周期同步后核查列表；完成回答后确认微信首行 ID、第二行标题。

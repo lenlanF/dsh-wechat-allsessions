@@ -131,9 +131,9 @@ test('restart runtime has no console interpreter and ships a Windows GUI-subsyst
   assert.equal(source.toLowerCase().includes('powershell.exe'), false);
   assert.equal(source.toLowerCase().includes('cmd.exe'), false);
   assert.ok(source.includes('definition.Principal.LogonType = 3'));
-  assert.ok(source.includes('definition.Principal.RunLevel = 0'));
+  assert.ok(source.includes('definition.Principal.RunLevel = runLevel'));
   assert.ok(source.includes('definition.Settings.MultipleInstances = 2'));
-  assert.ok(source.includes('RegisterTask(desktopName, exePath, "", null, "PT0S", true)'));
+  assert.ok(source.includes('RegisterTask(desktopName, exePath, "", null, "PT0S", true,'));
   assert.ok(source.includes('DateTime.Now.AddMinutes(3)'));
   assert.ok(source.includes('CleanupTasks(requestId)'));
   assert.equal(source.split('Triggers.Create(').length - 1, 1,
@@ -141,6 +141,19 @@ test('restart runtime has no console interpreter and ships a Windows GUI-subsyst
   assert.equal(source.includes('Repetition.Interval'), false);
 });
 
+
+test('restart worker task matches the existing Desktop elevation without UAC or a console', async () => {
+  const source = await readFile(new URL('../scripts/windows/desktop-restart-native.cs', import.meta.url), 'utf8');
+  assert.ok(source.includes('TokenElevationClass = 20'));
+  assert.ok(source.includes('IsProcessElevated(target.Pid) ? 1 : 0'));
+  assert.ok(source.includes('Put(ticket, "oldMainElevated", runLevel)'));
+  assert.ok(source.includes('"PT5M", true, runLevel'));
+  assert.ok(source.includes('desktop-worker-elevation-mismatch'));
+  assert.ok(source.includes('(int)Number(ticket, "oldMainElevated")'));
+  assert.ok(source.includes('--probe-task-high'));
+  assert.ok(source.includes('desktop-process-stop-denied'));
+  assert.ok(source.includes('desktop-process-stop-race'));
+});
 
 test('Windows Desktop root preflight exposes fixed error codes without private data', async () => {
   const causes = [

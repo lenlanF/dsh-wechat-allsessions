@@ -25,6 +25,45 @@ namespace DshWechatRestart {
     private const string DesktopName = "DeepSeek Harness.exe";
     private const int StdOutput = -11;
     private const int StdError = -12;
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint TokenQuery = 0x0008;
+    private const int TokenElevationClass = 20;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct TokenElevationInfo { public int TokenIsElevated; }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, int processId);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr token, int tokenClass,
+      out TokenElevationInfo elevation, int size, out int returnedLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private static bool IsProcessElevated(int pid) {
+      IntPtr process = OpenProcess(ProcessQueryLimitedInformation, false, pid);
+      if (process == IntPtr.Zero)
+        throw new InvalidOperationException("desktop-process-token-unavailable");
+      try {
+        IntPtr token;
+        if (!OpenProcessToken(process, TokenQuery, out token))
+          throw new InvalidOperationException("desktop-token-unavailable");
+        try {
+          TokenElevationInfo elevation;
+          int returnedLength;
+          if (!GetTokenInformation(token, TokenElevationClass, out elevation,
+              Marshal.SizeOf(typeof(TokenElevationInfo)), out returnedLength))
+            throw new InvalidOperationException("desktop-elevation-check-failed");
+          return elevation.TokenIsElevated != 0;
+        } finally { CloseHandle(token); }
+      } finally { CloseHandle(process); }
+    }
+
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GetStdHandle(int handle);
@@ -42,7 +81,8 @@ namespace DshWechatRestart {
         if (mode == "--schedule" && args.Length == 2) return Schedule(args[1]);
         if (mode == "--execute" && args.Length == 2) return Execute(args[1]);
         if (mode == "--cleanup" && args.Length == 2) return Cleanup(args[1]);
-        if (mode == "--probe-task" && args.Length == 2) return ProbeTask(args[1]);
+        if (mode == "--probe-task" && args.Length == 2) return ProbeTask(args[1], 0);
+        if (mode == "--probe-task-high" && args.Length == 2) return ProbeTask(args[1], 1);
         if (mode == "--probe-long" && args.Length == 3) return ProbeLong(args[1], args[2]);
         if (mode == "--probe-self-delete" && args.Length == 3) return ProbeSelfDelete(args[1], args[2]);
         return Fail("invalid-arguments", 2);
@@ -252,7 +292,7 @@ namespace DshWechatRestart {
     }
 
     private static void RegisterTask(string name, string actionPath, string actionArguments,
-      DateTime? triggerAt, string executionTimeLimit, bool runNow) {
+      DateTime? triggerAt, string executionTimeLimit, bool runNow, int runLevel = 0) {
       object service = null, root = null;
       dynamic definition = null, action = null, task = null, running = null, trigger = null;
       string stage = "connect";
@@ -271,7 +311,7 @@ namespace DshWechatRestart {
         definition.Settings.MultipleInstances = 2;
         definition.Principal.UserId = WindowsIdentity.GetCurrent().Name;
         definition.Principal.LogonType = 3;
-        definition.Principal.RunLevel = 0;
+        definition.Principal.RunLevel = runLevel;
         if (triggerAt.HasValue) {
           stage = "create-trigger";
           trigger = definition.Triggers.Create(1);
@@ -341,7 +381,17 @@ namespace DshWechatRestart {
       string name = WorkerTaskName(Text(ticket, "requestId"));
       if (TaskExists(name)) return Fail("restart-task-already-exists", 21);
       try {
-        RegisterTask(name, HelperPath, "--execute \"" + ticketPath + "\"", null, "PT5M", true);
+        // Match the running Desktop's actual Windows token elevation.
+        // The Host already has to possess this privilege; there is no UAC
+        // prompt and no privilege escalation beyond the target Desktop.
+        DesktopProcess target = GetDesktopMain(Text(ticket, "exePath"));
+        if (target.Pid != Number(ticket, "oldMainPid"))
+          throw new InvalidOperationException("desktop-main-changed");
+        int runLevel = IsProcessElevated(target.Pid) ? 1 : 0;
+        Put(ticket, "oldMainElevated", runLevel);
+        WriteTicket(ticketPath, ticket);
+        RegisterTask(name, HelperPath, "--execute \"" + ticketPath + "\"",
+          null, "PT5M", true, runLevel);
         DateTime deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline) {
           Dictionary<string, object> current = ReadTicket(ticketPath);
@@ -379,14 +429,29 @@ namespace DshWechatRestart {
 
     private static void StopDesktopTree(List<DesktopProcess> tree, string exePath) {
       foreach (DesktopProcess entry in tree) {
+        // Renderer/utility children can exit spontaneously during a shutdown.
+        // Only ignore a termination race if the exact old executable PID is
+        // no longer alive; an access-denied error must always remain fatal.
         DesktopProcess current = GetProcess(entry.Pid);
         if (current == null) continue;
         if (!String.Equals(current.Path, exePath, StringComparison.OrdinalIgnoreCase)
           || current.ParentPid != entry.ParentPid)
           throw new InvalidOperationException("desktop-process-changed");
-        using (Process process = Process.GetProcessById(entry.Pid)) {
-          process.Kill();
-          if (!process.WaitForExit(10000)) throw new InvalidOperationException("desktop-process-stop-timeout");
+        try {
+          using (Process process = Process.GetProcessById(entry.Pid)) {
+            if (process.HasExited) continue;
+            process.Kill();
+            if (!process.WaitForExit(10000) && IsOldProcessAlive(entry.Pid, exePath))
+              throw new InvalidOperationException("desktop-process-stop-timeout");
+          }
+        } catch (ArgumentException) {
+          if (IsOldProcessAlive(entry.Pid, exePath))
+            throw new InvalidOperationException("desktop-process-stop-race");
+        } catch (InvalidOperationException) {
+          if (IsOldProcessAlive(entry.Pid, exePath)) throw;
+        } catch (System.ComponentModel.Win32Exception) {
+          if (IsOldProcessAlive(entry.Pid, exePath))
+            throw new InvalidOperationException("desktop-process-stop-denied");
         }
       }
       DateTime deadline = DateTime.UtcNow.AddSeconds(20);
@@ -397,6 +462,7 @@ namespace DshWechatRestart {
       }
       throw new InvalidOperationException("old-desktop-process-residue");
     }
+
 
     private static int WaitForStableNewMain(int oldPid, string exePath, int timeoutSeconds) {
       DateTime deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
@@ -445,10 +511,11 @@ namespace DshWechatRestart {
       string desktopName = DesktopTaskName(requestId);
       if (!TaskExists(cleanupName)) {
         RegisterTask(cleanupName, HelperPath, "--cleanup " + requestId,
-          DateTime.Now.AddMinutes(3), "PT30S", false);
+          DateTime.Now.AddMinutes(3), "PT30S", false, (int)Number(ticket, "oldMainElevated"));
       }
       if (!TaskExists(desktopName)) {
-        RegisterTask(desktopName, exePath, "", null, "PT0S", true);
+        RegisterTask(desktopName, exePath, "", null, "PT0S", true,
+          (int)Number(ticket, "oldMainElevated"));
       } else {
         RunTask(desktopName);
       }
@@ -469,6 +536,8 @@ namespace DshWechatRestart {
         if (original.Pid != Number(ticket, "oldMainPid")
           || !String.Equals(original.Path, Text(ticket, "exePath"), StringComparison.OrdinalIgnoreCase))
           throw new InvalidOperationException("desktop-process-changed");
+        if (IsProcessElevated(original.Pid) && !IsProcessElevated(Process.GetCurrentProcess().Id))
+          throw new InvalidOperationException("desktop-worker-elevation-mismatch");
         Put(ticket, "phase", "executing");
         Put(ticket, "workerPid", Process.GetCurrentProcess().Id);
         Put(ticket, "workerStartedAt", UtcMs());
@@ -493,13 +562,22 @@ namespace DshWechatRestart {
         WriteTicket(ticketPath, ticket);
         DeleteTask(WorkerTaskName(requestId));
         return 0;
-      } catch {
-        if (ticket != null) RecoverAfterFailure(ticketPath, ticket, requestId);
+      } catch (Exception error) {
+        if (ticket != null) RecoverAfterFailure(ticketPath, ticket, requestId, error);
         return 30;
       }
     }
 
-    private static void RecoverAfterFailure(string ticketPath, Dictionary<string, object> ticket, string requestId) {
+    private static string SafeRestartFailureCode(Exception error) {
+      string text = error is InvalidOperationException ? error.Message : "";
+      if (text.StartsWith("desktop-", StringComparison.Ordinal)
+        && text.Length <= 64 && text.All(c => (c >= 'a' && c <= 'z') || c == '-'))
+        return text;
+      return "desktop-restart-failed";
+    }
+
+    private static void RecoverAfterFailure(string ticketPath, Dictionary<string, object> ticket,
+      string requestId, Exception error) {
       try {
         Dictionary<string, object> current = ReadTicket(ticketPath);
         if (Text(current, "requestId") != Text(ticket, "requestId")) return;
@@ -508,7 +586,7 @@ namespace DshWechatRestart {
         string exePath = Text(current, "exePath");
         if (IsOldProcessAlive(oldPid, exePath)) {
           Put(current, "phase", "failed");
-          Put(current, "failureCode", "desktop-restart-failed");
+          Put(current, "failureCode", SafeRestartFailureCode(error));
           Put(current, "finishedAt", UtcMs());
           WriteTicket(ticketPath, current);
           CleanupTasks(requestId);
@@ -580,17 +658,19 @@ namespace DshWechatRestart {
       }
     }
 
-    private static int ProbeTask(string marker) {
+    private static int ProbeTask(string marker, int runLevel) {
       if (!Path.IsPathRooted(marker) || marker.IndexOf('"') >= 0) return Fail("invalid-probe-path", 40);
       string name = "DSHWechatRestartProbe-" + Guid.NewGuid().ToString("N");
       string start = marker + ".start";
       string end = marker + ".end";
       try {
         foreach (string path in new string[] { marker, start, end, marker + ".self-start", marker + ".self-end", marker + ".error" }) if (File.Exists(path)) File.Delete(path);
-        RegisterTask(name, HelperPath, "--probe-long \"" + marker + "\" \"" + name + "\"", null, "PT10S", true);
+        RegisterTask(name, HelperPath, "--probe-long \"" + marker + "\" \"" + name + "\"", null, "PT10S", true, runLevel);
         DateTime startDeadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < startDeadline && !File.Exists(start)) Thread.Sleep(100);
         if (!File.Exists(start)) return Fail("probe-action-not-started", 41);
+        if (runLevel == 1 && !File.ReadAllText(start).Contains("elevated=true"))
+          return Fail("probe-worker-not-elevated", 48);
         DeleteTask(name);
         DateTime endDeadline = DateTime.UtcNow.AddSeconds(10);
         while (DateTime.UtcNow < endDeadline && !File.Exists(end)) Thread.Sleep(100);
@@ -632,7 +712,8 @@ namespace DshWechatRestart {
 
     private static int ProbeLong(string marker, string taskName) {
       try {
-        File.WriteAllText(marker + ".start", Process.GetCurrentProcess().Id.ToString());
+        File.WriteAllText(marker + ".start", Process.GetCurrentProcess().Id
+          + ";elevated=" + (IsProcessElevated(Process.GetCurrentProcess().Id) ? "true" : "false"));
         Thread.Sleep(3500);
         File.WriteAllText(marker + ".end", "survived-task-delete");
         return 0;
