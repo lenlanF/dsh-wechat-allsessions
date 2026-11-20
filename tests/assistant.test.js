@@ -56,7 +56,7 @@ async function fixture(t, options = {}) {
     effect() {}, inject() {}, logger: { info() {}, warn() {} },
   };
   const transport = {
-    async notifyStart() {}, async notifyStop() {},
+    async notifyStart() { if (options.notifyStartError) throw options.notifyStartError; }, async notifyStop() {},
     async pollLogin() { return options.scanConfirmation ?? { status: 'wait' }; },
     async getUpdates({ signal }) {
       options.pollStarted?.();
@@ -90,6 +90,26 @@ async function fixture(t, options = {}) {
   return { dir, stateDir, routeStorePath, records, handlers, sends, prompts, handle, request };
 }
 
+
+test('temporary iLink notifyStart failure still starts exactly one WeChat polling loop', async t => {
+  let polls = 0;
+  const f = await fixture(t, {
+    autoStart: true,
+    notifyStartError: Object.assign(new Error('temporary external error'), { code: 'network-error' }),
+    pollStarted() { polls += 1; },
+  });
+  const deadline = Date.now() + 2000;
+  while (!polls && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.equal(polls, 1, 'a failed start notification must not prevent getUpdates');
+  const status = await f.request('status');
+  assert.equal(status.body.connected, true);
+  assert.equal(status.body.enabled, true);
+  assert.equal(status.body.polling, true);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(polls, 1, 'the recovery must not spawn duplicate polling loops');
+});
 
 test('/restart is handled by the plugin with a durable ticket and does not submit a DSH prompt', async t => {
   let pid = 151;
@@ -530,7 +550,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.7');
+  assert.equal(response.version, '0.4.8');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));
