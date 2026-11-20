@@ -59,27 +59,27 @@ test('restart driver refuses unsafe platforms or ambiguous executable paths', as
   await assert.rejects(malformed.inspect(), /invalid-dsh-desktop-main-process/);
 });
 
-test('the built-in Windows restart check launches only an argument-vector PowerShell command', async () => {
-  let args;
+test('the built-in Windows process check uses the packaged GUI helper', async () => {
+  let captured;
   const valid = createDesktopRestartDriver({
     platform: 'win32',
-    execFile: async (_exe, argv, opts) => {
-      args = { argv, opts };
+    execFile: async (executable, argv, options) => {
+      captured = { executable, argv, options };
       return { stdout: JSON.stringify({
         pid: 321,
         exePath: 'D:\\Program\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe',
+        treeCount: 4,
       }) };
     },
   });
   const item = await valid.inspect();
   assert.equal(item.pid, 321);
-  assert.ok(args.argv.includes('-Mode') && args.argv.includes('Check'));
-  assert.ok(args.argv.some(value => value.endsWith('restart-desktop.ps1')));
-  assert.equal(args.argv[0], '-NoProfile');
-  assert.equal(args.opts.windowsHide, true);
+  assert.ok(captured.executable.endsWith('dsh-wechat-restart.exe'));
+  assert.deepEqual(captured.argv, ['--check']);
+  assert.equal(captured.options.windowsHide, true);
 });
 
-test('launch waits for an independent one-time worker acknowledgement', async () => {
+test('restart launches an independent one-shot task through the native GUI helper', async () => {
   const captured = [];
   const driver = createDesktopRestartDriver({
     platform: 'win32',
@@ -90,48 +90,57 @@ test('launch waits for an independent one-time worker acknowledgement', async ()
   });
   await driver.launch('D:\\Temp\\request.json');
   assert.equal(captured.length, 1);
-  assert.ok(captured[0].args.some(arg => arg.endsWith('schedule-desktop-restart.ps1')));
-  assert.ok(captured[0].args.includes('D:\\Temp\\request.json'));
+  assert.ok(captured[0].executable.endsWith('dsh-wechat-restart.exe'));
+  assert.deepEqual(captured[0].args, ['--schedule', 'D:\\Temp\\request.json']);
   assert.equal(captured[0].options.windowsHide, true);
-  assert.equal(captured[0].options.timeout, 22_000);
+  assert.equal(captured[0].options.timeout, 35_000);
   const fail = createDesktopRestartDriver({
     platform: 'win32', execFile: async () => ({ stdout: '{"workerStarted":false}' }),
   });
   await assert.rejects(() => fail.launch('D:\\Temp\\request.json'), /restart-worker-not-started/);
 });
 
-test('cleanup verification rejects a leftover task or worker', async () => {
-  const called = [];
+test('completion is withheld until the native helper verifies process and task cleanup', async () => {
+  const captured = [];
   const driver = createDesktopRestartDriver({
     platform: 'win32',
-    execFile: async (_program, argv) => {
-      called.push(argv);
+    execFile: async (executable, argv, options) => {
+      captured.push({ executable, argv, options });
       return { stdout: '{"clean":true}' };
     },
   });
   assert.equal(await driver.verifyClean('D:\\Temp\\request.json'), true);
-  assert.ok(called[0].includes('CheckClean'));
+  assert.ok(captured[0].executable.endsWith('dsh-wechat-restart.exe'));
+  assert.deepEqual(captured[0].argv, ['--check-clean', 'D:\\Temp\\request.json']);
+  assert.equal(captured[0].options.windowsHide, true);
   const unclean = createDesktopRestartDriver({
     platform: 'win32', execFile: async () => ({ stdout: '{"clean":false}' }),
   });
   await assert.rejects(() => unclean.verifyClean('D:\\Temp\\request.json'), /cleanup-unverified/);
 });
 
-test('scheduled restart is on-demand with no triggers, repetition, escalation or permanent worker', async () => {
-  const scheduler = await readFile(new URL('../scripts/schedule-desktop-restart.ps1', import.meta.url), 'utf8');
-  const worker = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
-  assert.ok(scheduler.includes('Schedule.Service'));
-  assert.ok(scheduler.includes('AllowDemandStart'));
-  assert.doesNotMatch(scheduler, /\.Triggers\.Create\(/);
-  assert.ok(scheduler.includes('LogonType = 3'));
-  assert.ok(scheduler.includes('RunLevel = 0'));
-  assert.ok(worker.includes('Remove-ScheduledTask'));
-  assert.ok(worker.indexOf('Remove-ScheduledTask\n  Write-Ticket $ticket')
-    < worker.indexOf('Stop-Process -Id $entry.pid'));
-  assert.ok(worker.includes('old-desktop-process-residue'));
-  assert.ok(worker.includes("CheckClean"));
-  assert.doesNotMatch(worker, /^\s*taskkill\b/m);
+test('restart runtime has no console interpreter and ships a Windows GUI-subsystem helper', async () => {
+  const source = await readFile(new URL('../scripts/windows/desktop-restart-native.cs', import.meta.url), 'utf8');
+  const runtime = await readFile(new URL('../lib/restart.js', import.meta.url), 'utf8');
+  const binary = await readFile(new URL('../bin/win-x64/dsh-wechat-restart.exe', import.meta.url));
+  const peOffset = binary.readUInt32LE(0x3c);
+  const subsystem = binary.readUInt16LE(peOffset + 24 + 68);
+  assert.equal(subsystem, 2, 'helper must be PE GUI subsystem, not console subsystem');
+  assert.equal(runtime.toLowerCase().includes('powershell.exe'), false);
+  assert.equal(runtime.toLowerCase().includes('cmd.exe'), false);
+  assert.equal(source.toLowerCase().includes('powershell.exe'), false);
+  assert.equal(source.toLowerCase().includes('cmd.exe'), false);
+  assert.ok(source.includes('definition.Principal.LogonType = 3'));
+  assert.ok(source.includes('definition.Principal.RunLevel = 0'));
+  assert.ok(source.includes('definition.Settings.MultipleInstances = 2'));
+  assert.ok(source.includes('RegisterTask(desktopName, exePath, "", null, "PT0S", true)'));
+  assert.ok(source.includes('DateTime.Now.AddMinutes(3)'));
+  assert.ok(source.includes('CleanupTasks(requestId)'));
+  assert.equal(source.split('Triggers.Create(').length - 1, 1,
+    'only the bounded fallback cleanup task may have a one-time trigger');
+  assert.equal(source.includes('Repetition.Interval'), false);
 });
+
 
 test('Windows Desktop root preflight exposes fixed error codes without private data', async () => {
   const causes = [
@@ -159,20 +168,15 @@ test('Windows Desktop root preflight exposes fixed error codes without private d
   }
 });
 
-test('Windows restart script writes tickets with nonempty atomic backup paths', async () => {
-  const source = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
-  assert.match(source, /\[IO\.File\]::Replace\(\$tmp,\s*\$TicketPath,\s*\$backup\)/);
-  assert.ok(source.includes("worker-"));
-  assert.match(source, /if \(Test-Path -LiteralPath \$backup\)/);
-  assert.doesNotMatch(source, /\[IO\.File\]::Replace\(\$tmp,\s*\$TicketPath,\s*\$null\)/);
-});
-
-test('shipped PowerShell driver selects root by parent PID and stops only verified executable subtree', async () => {
-  const source = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
-  assert.match(source, /ParentProcessId/);
-  assert.match(source, /Get-DesktopTree/);
-  assert.match(source, /Sort-Object depth -Descending/);
-  assert.match(source, /Stop-Process -Id \$entry\.pid -Force/);
-  assert.doesNotMatch(source, /^\s*taskkill\b/m);
-  assert.ok(source.includes('desktop-root-process-not-unique'));
+test('native helper atomically persists restart tickets and verifies a single executable process tree', async () => {
+  const source = await readFile(new URL('../scripts/windows/desktop-restart-native.cs', import.meta.url), 'utf8');
+  assert.ok(source.includes('File.Replace(temp, path, backup)'));
+  assert.ok(source.includes('GetDesktopTree'));
+  assert.ok(source.includes('StopDesktopTree'));
+  assert.ok(source.includes('oldTreePids'));
+  assert.ok(source.includes('old-desktop-process-residue'));
+  assert.ok(source.includes('desktop-new-main-not-stable'));
+  assert.ok(source.includes('desktop-stopped-during-task-cleanup'));
+  assert.ok(source.includes('workerPid'));
+  assert.ok(source.includes('PT0S'));
 });

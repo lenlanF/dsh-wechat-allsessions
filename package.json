@@ -1,12 +1,13 @@
 {
   "name": "dsh-wechat-allsessions",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "微信助手：自动绑定并广播 DSH 未归档会话，支持微信端与插件内按对话管理广播和续接对话。",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
   "files": [
     "lib",
+    "bin",
     "scripts",
     "third_party",
     "docs",
@@ -27,6 +28,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
+    "build:restart-helper": "node scripts/build-restart-helper.js",
     "test": "node --test tests/*.test.js"
   },
   "dsh": {
