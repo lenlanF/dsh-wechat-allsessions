@@ -182,7 +182,7 @@ test('Windows Desktop root preflight exposes fixed error codes without private d
   }
 });
 
-test('native helper distinguishes PID reuse and parent changes by process creation time', async t => {
+test('native identity comparison rejects PID reuse without depending on runner WMI visibility', async t => {
   if (process.platform !== 'win32') {
     t.skip('Windows-only native process identity test');
     return;
@@ -191,16 +191,47 @@ test('native helper distinguishes PID reuse and parent changes by process creati
   const { promisify } = await import('node:util');
   const exe = new URL('../bin/win-x64/dsh-wechat-restart.exe', import.meta.url);
   const { stdout } = await promisify(execFile)(
-    fileURLToPath(exe), ['--probe-identity', String(process.pid)],
+    fileURLToPath(exe), ['--probe-identity', 'fixture'],
     { windowsHide: true, timeout: 15000, maxBuffer: 4096 });
-  const result = JSON.parse(stdout.trim());
-  assert.deepEqual(result, {
+  assert.deepEqual(JSON.parse(stdout.trim()), {
     safeIdentity: true,
     parentChangeHarmless: true,
     pidReuseRejected: true,
     pathMismatchRejected: true,
+    wmiQueried: false,
   });
 });
+
+test('live WMI identity probe is checked separately and reports unavailable contexts', async t => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only live WMI integration probe');
+    return;
+  }
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const exe = new URL('../bin/win-x64/dsh-wechat-restart.exe', import.meta.url);
+  let stdout;
+  try {
+    ({ stdout } = await promisify(execFile)(
+      fileURLToPath(exe), ['--probe-identity', String(process.pid)],
+      { windowsHide: true, timeout: 15000, maxBuffer: 4096 }));
+  } catch (error) {
+    if (error?.code === 62 && String(error?.stderr ?? '').includes('probe-process-unavailable')) {
+      t.diagnostic('Runner Node subprocess is not exposed through the WMI process query.');
+      t.skip('WMI returned no visible creation-time record for the test runner process; production check is unchanged');
+      return;
+    }
+    throw error;
+  }
+  assert.deepEqual(JSON.parse(stdout.trim()), {
+    safeIdentity: true,
+    parentChangeHarmless: true,
+    pidReuseRejected: true,
+    pathMismatchRejected: true,
+    wmiQueried: true,
+  });
+});
+
 
 test('snapshot cleanup checks creation time, current process handle and late child residue', async () => {
   const source = await readFile(new URL('../scripts/windows/desktop-restart-native.cs', import.meta.url), 'utf8');

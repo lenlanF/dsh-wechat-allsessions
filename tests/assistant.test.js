@@ -550,7 +550,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.10');
+  assert.equal(response.version, '0.4.11');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

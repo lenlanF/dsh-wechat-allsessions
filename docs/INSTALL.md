@@ -1,4 +1,4 @@
-# 微信助手安装和升级（dsh-wechat-allsessions v0.4.10）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.4.11）
 
 ## 保持原配置及数据
 
@@ -8,7 +8,7 @@
 
 ## 安装
 
-可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.10，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.11，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
 ~~~yaml
 - insert:
@@ -48,6 +48,10 @@
 广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 微信消息按完整句子、行与段落安全分段，不截断 /session 会话命令。正文或单句超限时会明确告知省略，绝不发送无法使用的残缺会话 ID。
 
+## v0.4.11 测试环境兼容
+
+将不依赖 WMI 的进程身份比较测试与依赖真实进程可见性的 Windows WMI 集成测试分开。Runner 的 Node 测试进程不可见时，只对退出码 62 的特定集成项注明跳过；生产 `/restart` 的 WMI/创建时间核验不变。对现有已正常运行的 v0.4.10，不要求为这项测试改动而强制重启。
+
 ## v0.4.10 进程身份校验
 
 在动态 Electron 进程树关停期间，以 PID、原可执行文件路径及进程创建时间锁定原始进程，不再依赖不稳定的父 PID 快照。已退出或 PID 被复用的子进程不会被误终止；只在当前句柄创建时间与原进程一致时才执行 Kill。确认旧路径进程全部退出后才会启动新实例；原有无窗口、同权限级别、无持续性计划任务和微信回执校验保持不变。
@@ -85,7 +89,7 @@ v0.4.7 的 /restart 运行链不启动 CMD 或 PowerShell。进程检查、调�
 检查安装版本不能只查看 GitHub 或源码仓库：必须核验当前 DSH Profile 下 node_modules/dsh-wechat-allsessions/package.json 版本、Host 实际加载的插件代码，并查看 /plugins/dsh-wechat-allsessions/status 的 version。若 /help 仍然进入了“最新 DSH 对话”而不是由微信助手直接回复，则当前微信消息由旧插件/其他桥接接收，排查该消费者之前不要叠加启动新的 getUpdates。状态接口新增的 sendLog.kind=wechat-command 可追踪微信命令回复发送是否成功（没有用户 ID 或敏感 token）。
 
 
-1. 检查已安装插件 package.json 版本为 0.4.10；设置页显示“微信助手”。
+1. 检查已安装插件 package.json 版本为 0.4.11；设置页显示“微信助手”。
 2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
 3. 微信发送 /help、/list 并核实对话清单与参数说明。
 4. 创建一条全新 DSH 对话，不发消息，等待周期同步后核查列表；完成回答后确认微信首行 ID、第二行标题。

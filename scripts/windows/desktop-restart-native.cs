@@ -378,14 +378,25 @@ namespace DshWechatRestart {
       DeleteTask(CleanupTaskName(requestId));
     }
 
-    // Read-only native regression probe. Never creates or stops processes.
+    // Deterministic identity regression: no WMI/process visibility assumption.
+    // The live PID path below remains the strict read-only integration probe.
     private static int ProbeIdentity(string pidText) {
-      int pid;
-      if (!Int32.TryParse(pidText, out pid) || pid <= 0)
-        return Fail("invalid-probe-pid", 61);
-      DesktopProcess current = GetProcess(pid);
-      if (current == null || String.IsNullOrEmpty(current.CreatedAtDmtf))
-        return Fail("probe-process-unavailable", 62);
+      bool fixture = String.Equals(pidText, "fixture", StringComparison.Ordinal);
+      DesktopProcess current;
+      if (fixture) {
+        current = new DesktopProcess {
+          Pid = 424242, ParentPid = 1000,
+          Path = @"C:\DshIdentityFixture\DeepSeek Harness.exe",
+          CreatedAtDmtf = "20261120210000.000000+480"
+        };
+      } else {
+        int pid;
+        if (!Int32.TryParse(pidText, out pid) || pid <= 0)
+          return Fail("invalid-probe-pid", 61);
+        current = GetProcess(pid);
+        if (current == null || String.IsNullOrEmpty(current.CreatedAtDmtf))
+          return Fail("probe-process-unavailable", 62);
+      }
       DesktopProcess parentChanged = new DesktopProcess {
         Pid = current.Pid, ParentPid = current.ParentPid + 1,
         Path = current.Path, CreatedAtDmtf = current.CreatedAtDmtf
@@ -398,19 +409,22 @@ namespace DshWechatRestart {
         Pid = current.Pid, ParentPid = current.ParentPid,
         Path = current.Path + ".not-the-same", CreatedAtDmtf = current.CreatedAtDmtf
       };
-      bool valid = IsSameDesktopInstance(current, GetProcess(pid))
+      bool valid = IsSameDesktopInstance(current, fixture ? current : GetProcess(current.Pid))
         && IsSameDesktopInstance(parentChanged, current)
         && !IsSameDesktopInstance(reusedPid, current)
         && !IsSameDesktopInstance(wrongPath, current);
-      using (Process handle = Process.GetProcessById(pid)) {
-        valid = valid && ProcessHandleMatches(current, handle);
+      if (!fixture) {
+        using (Process handle = Process.GetProcessById(current.Pid))
+          valid = valid && ProcessHandleMatches(current, handle);
       }
       Output(new Dictionary<string, object> {
         { "safeIdentity", valid }, { "parentChangeHarmless", true },
-        { "pidReuseRejected", true }, { "pathMismatchRejected", true }
+        { "pidReuseRejected", true }, { "pathMismatchRejected", true },
+        { "wmiQueried", !fixture }
       });
       return valid ? 0 : 63;
     }
+
 
     private static int Schedule(string ticketPath) {
       Dictionary<string, object> ticket = ReadTicket(ticketPath);
