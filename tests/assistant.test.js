@@ -139,7 +139,7 @@ test('/restart refuses untrusted senders and missing Desktop main process', asyn
   assert.equal(f.sends.length, 0);
   await f.handle.handleInbound(message('/restart', 'owner-id'));
   assert.equal(launched.length, 0);
-  assert.ok(f.sends.some(x => x.text.includes('未执行重启')));
+  assert.ok(f.sends.some(x => x.text.includes('未执行重启') || x.text.includes('未执行 DSH Desktop 重启') || x.text.includes('未执行重启：')));
   assert.equal(f.prompts.length, 0);
 });
 
@@ -455,7 +455,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.3');
+  assert.equal(response.version, '0.4.4');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

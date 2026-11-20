@@ -13,14 +13,21 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 function Get-DesktopMain {
-  $candidates = @(Get-CimInstance Win32_Process -Filter "Name = 'DeepSeek Harness.exe'" |
+  # Electron utility/renderer processes and even nested Node workers can have
+  # the identical exe name. Some utility workers lack the --type flag entirely.
+  # Identify the ONE root of the executable process tree instead of assuming
+  # that every process without --type is a Desktop main.
+  $instances = @(Get-CimInstance Win32_Process -Filter "Name = 'DeepSeek Harness.exe'" |
     Where-Object {
       $_.ExecutablePath -and
-      [IO.Path]::GetFileName($_.ExecutablePath) -eq 'DeepSeek Harness.exe' -and
-      $_.CommandLine -notmatch '(?i)--type=|--expose-internals'
+      [IO.Path]::GetFileName($_.ExecutablePath) -eq 'DeepSeek Harness.exe'
     })
-  if ($candidates.Count -ne 1) { throw 'desktop-main-process-not-unique' }
-  $item = $candidates[0]
+  if ($instances.Count -eq 0) { throw 'desktop-process-not-running' }
+  $allPids = [System.Collections.Generic.HashSet[int]]::new()
+  foreach ($instance in $instances) { [void] $allPids.Add([int] $instance.ProcessId) }
+  $roots = @($instances | Where-Object { -not $allPids.Contains([int] $_.ParentProcessId) })
+  if ($roots.Count -ne 1) { throw 'desktop-root-process-not-unique' }
+  $item = $roots[0]
   $folder = Split-Path -Parent $item.ExecutablePath
   if (-not (Test-Path -LiteralPath (Join-Path $folder 'resources\app.asar') -PathType Leaf)) {
     throw 'desktop-bundle-not-found'
@@ -29,6 +36,36 @@ function Get-DesktopMain {
     pid = [int] $item.ProcessId
     exePath = [string] $item.ExecutablePath
   }
+}
+
+function Get-DesktopTree([int] $mainPid, [string] $exePath) {
+  # Only inspect this EXACT installed executable. The detached PowerShell
+  # watchdog and unrelated Node.exe processes must never be terminated.
+  $instances = @(Get-CimInstance Win32_Process -Filter "Name = 'DeepSeek Harness.exe'" |
+    Where-Object { $_.ExecutablePath -eq $exePath })
+  $levels = @{}
+  $levels[$mainPid] = 0
+  for ($i = 0; $i -lt $instances.Count; $i++) {
+    $updated = $false
+    foreach ($pr in $instances) {
+      $pidValue = [int] $pr.ProcessId
+      $parentPid = [int] $pr.ParentProcessId
+      if (-not $levels.ContainsKey($pidValue) -and $levels.ContainsKey($parentPid)) {
+        $levels[$pidValue] = $levels[$parentPid] + 1
+        $updated = $true
+      }
+    }
+    if (-not $updated) { break }
+  }
+  if ($levels.Count -ne $instances.Count) { throw 'desktop-tree-incomplete' }
+  $list = foreach ($pr in $instances) {
+    [pscustomobject]@{
+      pid = [int] $pr.ProcessId
+      parentPid = [int] $pr.ParentProcessId
+      depth = [int] $levels[[int] $pr.ProcessId]
+    }
+  }
+  return $list | Sort-Object depth -Descending
 }
 
 function Write-Ticket([object] $item) {
@@ -44,11 +81,21 @@ function Write-Ticket([object] $item) {
 
 if ($Mode -eq 'Check') {
   try {
-    Get-DesktopMain | ConvertTo-Json -Compress
+    $main = Get-DesktopMain
+    $tree = @(Get-DesktopTree ([int]$main.pid) ([string]$main.exePath))
+    [pscustomobject]@{
+      pid = [int] $main.pid
+      exePath = [string] $main.exePath
+      treeCount = $tree.Count
+    } | ConvertTo-Json -Compress
     exit 0
   } catch {
-    [Console]::Error.WriteLine('desktop-restart-unavailable')
-    exit 3
+    # Distinguishable, fixed error codes: never echo private paths or args.
+    $reason = [string] $_.Exception.Message
+    if ($reason -eq 'desktop-process-not-running') { exit 10 }
+    if ($reason -eq 'desktop-root-process-not-unique') { exit 11 }
+    if ($reason -eq 'desktop-bundle-not-found') { exit 12 }
+    exit 13
   }
 }
 
@@ -77,10 +124,23 @@ try {
   $original = Get-DesktopMain
   if ($original.pid -ne [int]$ticket.oldMainPid) { throw 'desktop-process-changed' }
 
-  # The installed production build exposes Electron relaunch only inside its
-  # main process (not over a safe plugin API). Never use taskkill /T: this
-  # detached watchdog is a descendant and would kill itself with the tree.
-  Stop-Process -Id ([int]$ticket.oldMainPid) -Force -ErrorAction Stop
+  # Stop only the verified Desktop executable process tree, deepest workers
+  # first; otherwise orphaned Electron workers can be mistaken for a second
+  # root when the new main process starts. Never use taskkill /T: that could
+  # terminate this separate watchdog along with the Desktop process.
+  $tree = @(Get-DesktopTree ([int]$ticket.oldMainPid) ([string]$ticket.exePath))
+  foreach ($entry in $tree) {
+    $current = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $entry.pid)
+    if (-not $current) {
+      if ($entry.pid -eq [int]$ticket.oldMainPid) { throw 'desktop-main-already-exited' }
+      continue
+    }
+    if ($current.ExecutablePath -ne [string]$ticket.exePath -or
+        [int]$current.ParentProcessId -ne $entry.parentPid) {
+      throw 'desktop-process-changed'
+    }
+    Stop-Process -Id $entry.pid -Force -ErrorAction Stop
+  }
   $stopped = $false
   for ($i = 0; $i -lt 60; $i++) {
     if (-not (Get-Process -Id ([int]$ticket.oldMainPid) -ErrorAction SilentlyContinue)) {

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { RESTART_TTL_MS, restartTicketPath, readRestartTicket, writeRestartTicket,
+import { RESTART_TTL_MS, restartTicketPath, readRestartTicket, writeRestartTicket,// Native driver errors are intentionally normalized before sending to WeChat.
   ticketActive, ticketReadyToNotify, createDesktopRestartDriver } from '../lib/restart.js';
 
 const testRoot = process.env.DSH_PLUGIN_TEST_TMP || tmpdir();
@@ -77,4 +77,40 @@ test('the built-in Windows restart check launches only an argument-vector PowerS
   assert.ok(args.argv.some(value => value.endsWith('restart-desktop.ps1')));
   assert.equal(args.argv[0], '-NoProfile');
   assert.equal(args.opts.windowsHide, true);
+});
+
+test('Windows Desktop root preflight exposes fixed error codes without private data', async () => {
+  const causes = [
+    [10, 'desktop-not-running'],
+    [11, 'desktop-root-ambiguous'],
+    [12, 'desktop-bundle-missing'],
+    [13, 'desktop-check-failed'],
+    ['ENOENT', 'desktop-check-failed'],
+  ];
+  for (const [exitCode, expected] of causes) {
+    const driver = createDesktopRestartDriver({
+      platform: 'win32',
+      execFile: async () => {
+        const err = new Error('redact-private-arguments-and-paths');
+        err.code = exitCode;
+        throw err;
+      },
+    });
+    await assert.rejects(() => driver.inspect(), error => {
+      assert.equal(error.code, expected);
+      assert.equal(error.message, expected);
+      assert.ok(!error.message.includes('redact-private'));
+      return true;
+    });
+  }
+});
+
+test('shipped PowerShell driver selects root by parent PID and stops only verified executable subtree', async () => {
+  const source = await readFile(new URL('../scripts/restart-desktop.ps1', import.meta.url), 'utf8');
+  assert.match(source, /ParentProcessId/);
+  assert.match(source, /Get-DesktopTree/);
+  assert.match(source, /Sort-Object depth -Descending/);
+  assert.match(source, /Stop-Process -Id \$entry\.pid -Force/);
+  assert.doesNotMatch(source, /^\s*taskkill\b/m);
+  assert.ok(source.includes('desktop-root-process-not-unique'));
 });
