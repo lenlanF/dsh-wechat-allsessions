@@ -1,6 +1,6 @@
 # 微信助手（dsh-wechat-allsessions）
 
-**v0.4.13 · DeepSeek Harness 微信 iLink 插件**
+**v0.4.14 · DeepSeek Harness 微信 iLink 插件**
 
 微信助手默认把 DSH **全部已有的未归档对话**与微信自动关联，新建对话也自动加入；每个对话默认开启广播。每条广播**最开头**固定显示会话 ID 和会话标题。插件设置页和微信命令都可独立开关指定对话的广播，重启后保留。
 
@@ -8,6 +8,19 @@
 
 ## 核心功能
 
+### 0.4.14 微信模型列表可直接使用，费率来源统一
+
+`/models list` 按 DSH Host **真实 Provider** 分组，标题直接标示渠道 ID；每个模型先显示模型名称及有依据的倍率，再另起一行给出可复制的**完整微信命令**，例如：
+
+    【Loomy · 渠道ID：loomy】
+    14. Spark-X2.6 正式版 · 倍率 x2.5
+    /models loomy spark-x2.6
+
+不再需要从中文名称、括号和模型 ID 自己拼出两个参数；即使名称与 ID 相同，也完整显示选择命令。`/models list -c` 显示每个 Provider 的精确查询命令；维持 25 个模型一页及 `/models list -p 2` 翻页，不引入受目录顺序变化影响的编号即切换。
+
+费率严格来自 **Host 实时模型目录**：优先读取官方模型条目 `badge.text`（WPS 灵犀等适配器发布倍率），否则读取名称末尾明确的 `x2.5`、`(x2.0)`、`（x0.8）`、`· x0.00`。明确数值标记为渠道/积分**倍率**，不冒充金额或 Token 单价；不会将 `Spark-X2.6` 这类型号版本误认成倍率。聚合路由的 `x?` 将从名称中去除；AutoFree 标为动态免费池（无固定倍率），路由链提示以实际执行渠道为准，其它无可靠倍率的模型不猜测数字。未显示倍率**不等于免费**。
+
+保留 v0.4.13 Provider 归属边界：聚合路由的自主模型、内部复用与路由链只属于 `native-router`，不与其它独立 Provider 互转。会话模型选择仍通过 Host `selectModel()` 以精确 Provider/Model ID 执行。
 ### 0.4.13 修正聚合路由与真实 Provider 边界
 
 `/models` **只把 Host `modelCatalog().groups` 里的 Provider ID 作为渠道身份**。`native-router` 是一个独立 Provider：它自己实现的模型、AutoFree、路由链、账号池以及它内部复用其它来源的模型，全部仍显示在 `native-router` 下；内部 `direct:来源:模型` 只是该 Provider 的模型 ID，不自动转成另一个 Provider，也不改变其原始模型 ID。`/models list -c` 不再重复虚构聚合内部来源为独立渠道。

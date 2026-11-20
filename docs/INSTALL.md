@@ -1,4 +1,4 @@
-# 微信助手安装和升级（dsh-wechat-allsessions v0.4.13）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.4.14）
 
 ## 保持原配置及数据
 
@@ -8,7 +8,7 @@
 
 ## 安装
 
-可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.13，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.14，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
 ~~~yaml
 - insert:
@@ -48,6 +48,11 @@
 广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 微信消息按完整句子、行与段落安全分段，不截断 /session 会话命令。正文或单句超限时会明确告知省略，绝不发送无法使用的残缺会话 ID。
 
+## v0.4.14 模型命令与倍率的直观展示
+
+`/models list` 和 `/models list <渠道ID>` 现在按真实 DSH Provider 分组：每个模型都有名称、已明确标注的倍率，以及独立一行的完整 `/models <渠道ID> <模型ID>` 命令。复制该行即可切换当前选中的 DSH 会话。`/models list -c` 提供渠道 ID 和对应查询命令。每页 25 项，支持 `-p 2`。
+
+倍率仅从 Host 模型目录 `badge.text` 或名称内的明确倍率取得。WPS 灵犀支持使用模型 `badge` 标记 x 倍率；Loomy 的 `(x2.5)`、`（x0.8）` 统一展示为“倍率 x...”并去掉名称内重复标记。聚合路由 `x?` 不再展示成费率；AutoFree 属动态免费池，路由链实际消耗视执行渠道而定，不编造固定倍率。无倍率的模型不等于免费。
 ## v0.4.13 Provider 身份边界修正
 
 只按 DSH Host 的 `modelCatalog().groups` 注册的 Provider 分类，不再为聚合路由内部来源自动创建 `workbuddy` 等渠道别名。聚合路由本身是独立 Provider；其自主模型、路由链、AutoFree 与内部复用模型仍保留在 `native-router` 中，选择时使用该 Provider 下完整模型 ID。即使 DSH 另有同名 Provider，其目录、模型和会话切换也必须独立处理。
@@ -99,7 +104,7 @@ v0.4.7 的 /restart 运行链不启动 CMD 或 PowerShell。进程检查、调�
 检查安装版本不能只查看 GitHub 或源码仓库：必须核验当前 DSH Profile 下 node_modules/dsh-wechat-allsessions/package.json 版本、Host 实际加载的插件代码，并查看 /plugins/dsh-wechat-allsessions/status 的 version。若 /help 仍然进入了“最新 DSH 对话”而不是由微信助手直接回复，则当前微信消息由旧插件/其他桥接接收，排查该消费者之前不要叠加启动新的 getUpdates。状态接口新增的 sendLog.kind=wechat-command 可追踪微信命令回复发送是否成功（没有用户 ID 或敏感 token）。
 
 
-1. 检查已安装插件 package.json 版本为 0.4.13；设置页显示“微信助手”。
+1. 检查已安装插件 package.json 版本为 0.4.14；设置页显示“微信助手”。
 2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
 3. 微信发送 /help、/list 并核实对话清单与参数说明。
 4. 创建一条全新 DSH 对话，不发消息，等待周期同步后核查列表；完成回答后确认微信首行 ID、第二行标题。

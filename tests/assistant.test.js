@@ -144,6 +144,27 @@ test('/models sends a complete paged WeChat catalog without silent message trunc
   assert.equal(f.selections.length, 0);
 });
 
+test('/models keeps every copyable model command complete when WeChat splits long lists', async t => {
+  const models = Array.from({ length: 25 }, (_, i) => ({
+    id: 'model-' + String(i).padStart(2, '0'),
+    name: '模型 ' + i + '（高精度文本推理）',
+  }));
+  const f = await fixture(t, { modelCatalog: { groups: [
+    { id: 'loomy', name: 'Loomy', models },
+  ], failures: [] } });
+  f.handle.refresh({ maxChunkBytes: 180 });
+  await f.handle.handleInbound(message('/models list loomy', 'models-multipart-commands'));
+  assert.ok(f.sends.length > 3, 'model list should span multiple WeChat messages');
+  assert.ok(f.sends.every(s => Buffer.byteLength(s.text, 'utf8') <= 180));
+  const lines = f.sends.flatMap(s => s.text.split('\n'));
+  for (const item of models) {
+    const command = '/models loomy ' + item.id;
+    assert.ok(lines.includes(command), 'full model selection line must be preserved: ' + command);
+  }
+  const all = f.sends.map(s => s.text).join('\n');
+  assert.doesNotMatch(all, /已截断|单句超限/u);
+  assert.equal(f.prompts.length, 0);
+});
 test('/models chooses a specific DSH Session and the host records exact selected provider/model', async t => {
   const catalog = { groups: [{ id: 'native-router', name: '聚合路由',
     models: [{ id: 'direct:workbuddy:hy4-flash', name: 'WorkBuddy · Hy4 flash · x0.00' }] }] };
@@ -685,7 +706,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.13');
+  assert.equal(response.version, '0.4.14');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));

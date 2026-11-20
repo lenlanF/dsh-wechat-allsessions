@@ -31,7 +31,7 @@ test('models parser covers all required commands and optional page controls', ()
 });
 test('model list draws only current Host catalog, no fake prices or hidden failures', () => {
   const all = modelListText(catalog).text;
-  assert.match(all, /聚合路由（native-router）/u);
+  assert.match(all, /聚合路由 · 渠道ID：native-router/u);
   assert.match(all, /WorkBuddy · Hy4 flash/u);
   assert.match(all, /direct:workbuddy:hy4-flash/u);
   assert.match(all, /倍率 x0\.00/u);
@@ -45,7 +45,7 @@ test('model list draws only current Host catalog, no fake prices or hidden failu
   assert.equal(findModel(catalog, 'native-router', 'direct:workbuddy:hy4-flash')?.id,
     'direct:workbuddy:hy4-flash');
   assert.equal(findModel(catalog, 'native-router', 'deepseek-v4-flash'), null);
-  assert.ok(displayModel(catalogGroups(catalog)[0], catalogGroups(catalog)[0].models[1]).includes('x?'));
+  assert.equal(displayModel(catalogGroups(catalog)[0], catalogGroups(catalog)[0].models[1]), 'Loomy · model/pro');
 });
 test('native-router is one independent Provider; its owned, reused, and chain models remain distinct', () => {
   const isolated = { groups: [
@@ -60,8 +60,8 @@ test('native-router is one independent Provider; its owned, reused, and chain mo
   ], failures: [] };
   const channels = modelListText(isolated, { channelsOnly: true }).text;
   assert.match(channels, /模型渠道（2 个/u);
-  assert.match(channels, /聚合路由（native-router）/u);
-  assert.match(channels, /独立注册的 WorkBuddy（workbuddy）/u);
+  assert.match(channels, /聚合路由（渠道ID：native-router）/u);
+  assert.match(channels, /独立注册的 WorkBuddy（渠道ID：workbuddy）/u);
   assert.doesNotMatch(channels, /native-router\/workbuddy|聚合路由 \/ workbuddy/u);
   const native = modelListText(isolated, { channel: 'native-router' }).text;
   assert.match(native, /autofree/u);
@@ -87,6 +87,76 @@ test('native-router is one independent Provider; its owned, reused, and chain mo
 });
 
 
+test('real-world catalog labels are readable and each item has a copyable exact /models command', () => {
+  const actual = { groups: [
+    { id: 'deepseek-account', name: 'DeepSeek Account', models: [
+      { id: 'deepseek-flash', name: 'DeepSeek-V4.1-Flash' },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek-V4-Pro' },
+    ] },
+    { id: 'lingxi', name: 'WPS 灵犀', models: [
+      { id: 'mimo-v2.6-pro', name: 'Xiaomi MiMo-V2.6 Pro', badge: { text: 'x0.20', tone: 'success' } },
+      { id: 'GLM-5.3-Flash', name: 'GLM-5.3-Flash' },
+      { id: 'qwen3.8_flash', name: 'Qwen3.8-Flash', badge: { text: { en: 'x0.80', 'zh-cn': 'x0.80' }, tone: 'info' } },
+    ] },
+    { id: 'loomy', name: 'Loomy', models: [
+      { id: 'spark-x2.6', name: 'Spark-X2.6 正式版(x2.5)' },
+      { id: 'DeepSeek-V4.1-Flash', name: 'DeepSeek V4.1 Flash(x2.0)' },
+      { id: 'GLM-5.3-Flash', name: 'GLM 5.3 Flash(x0.8)' },
+      { id: 'qwen3.8-flash', name: 'qwen 3.8 flash（x0.8）' },
+      { id: 'auto', name: '自动 · 均衡' },
+    ] },
+    { id: 'native-router', name: '聚合路由', models: [
+      { id: 'autofree', name: '聚合路由 · AutoFree · x?' },
+      { id: 'chain:custom', name: '聚合路由 · Custom · x?' },
+      { id: 'direct:workbuddy:hy4-flash', name: 'WorkBuddy · Hy4 flash · x0.00' },
+      { id: 'direct:other:mimo', name: '来源A · MiMo · x?' },
+    ] },
+  ] };
+  const text = modelListText(actual).text;
+  assert.match(text, /【DeepSeek Account · 渠道ID：deepseek-account】/u);
+  assert.match(text, /【WPS 灵犀 · 渠道ID：lingxi】/u);
+  assert.match(text, /【Loomy · 渠道ID：loomy】/u);
+  assert.match(text, /【聚合路由 · 渠道ID：native-router】/u);
+  for (const command of [
+    '/models deepseek-account deepseek-flash',
+    '/models lingxi mimo-v2.6-pro',
+    '/models lingxi GLM-5.3-Flash',
+    '/models loomy spark-x2.6',
+    '/models loomy GLM-5.3-Flash',
+    '/models native-router autofree',
+    '/models native-router direct:workbuddy:hy4-flash',
+  ]) assert.ok(text.includes(command), command);
+  assert.match(text, /Xiaomi MiMo-V2\.6 Pro · 倍率 x0\.20/u);
+  assert.match(text, /Qwen3\.8-Flash · 倍率 x0\.80/u);
+  assert.match(text, /Spark-X2\.6 正式版 · 倍率 x2\.5/u);
+  assert.match(text, /DeepSeek V4\.1 Flash · 倍率 x2\.0/u);
+  assert.match(text, /GLM 5\.3 Flash · 倍率 x0\.8/u);
+  assert.match(text, /qwen 3\.8 flash · 倍率 x0\.8/u);
+  assert.match(text, /AutoFree · 动态免费池（无固定倍率）/u);
+  assert.match(text, /Custom · 路由链（以实际执行渠道为准）/u);
+  assert.doesNotMatch(text, /x\?|来源A.*倍率 x0/u);
+  assert.doesNotMatch(text, /\/models workbuddy hy4-flash/u,
+    'native-router internal model never becomes an independent Provider command');
+});
+test('Loomy multiplier is parsed only when explicitly labelled, not from model version', () => {
+  const loomy = { id: 'loomy', name: 'Loomy' };
+  assert.equal(displayModel(loomy, { id: 'spark-x2.6', name: 'Spark-X2.6 正式版' }),
+    'Spark-X2.6 正式版');
+  assert.equal(displayModel(loomy, { id: 'spark-x2.6', name: 'Spark-X2.6 正式版(x2.5)' }),
+    'Spark-X2.6 正式版 · 倍率 x2.5');
+  assert.equal(displayModel(loomy, { id: 'a', name: 'Model (x2.5)', badge: { text: 'x0.8' } }),
+    'Model · 倍率 x0.8', 'fresh provider badge should win over a stale name suffix');
+  assert.equal(displayModel(loomy, { id: 'a', name: 'Model（x?）' }), 'Model');
+  assert.equal(displayModel(loomy, { id: 'a', name: 'Model', badge: { text: { en: 'Free' } } }),
+    'Model · 渠道标记：免费');
+});
+test('channel-only listing makes exact query commands visible', () => {
+  const text = modelListText(catalog, { channelsOnly: true }).text;
+  assert.match(text, /渠道ID：native-router/u);
+  assert.match(text, /\/models list native-router/u);
+  assert.match(text, /渠道ID：deepseek-account/u);
+  assert.match(text, /\/models list deepseek-account/u);
+});
 test('model listing paginates with explicit next command; no silent truncation', () => {
   const large = { groups: [{ id: 'busy', name: 'Busy', models: Array.from({ length: 64 }, (_, i) => ({ id: 'id-' + i, name: 'Model ' + i })) }] };
   const first = modelListText(large);
