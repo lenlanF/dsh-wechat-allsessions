@@ -74,7 +74,8 @@ async function fixture(t, options = {}) {
           sessionId: row.sessionId ?? row.id ?? row.session_id,
           cwd: row.header?.cwd ?? row.cwd ?? '',
           origin: row.header?.origin ?? row.origin,
-          parentSessionId: row.header?.parentSessionId ?? row.parentSessionId,
+          parentSessionId: row.header?.parentSession ?? row.header?.parentSessionId ?? row.parentSessionId,
+          blank: row.blank === true,
           projections: { values: { title: row.header?.title ?? row.title ?? '' } },
         })) };
       },
@@ -459,7 +460,7 @@ test('unavailable DSH persistent catalog cannot prevent WeChat startup or existi
   assert.equal(status.connected, true);
   assert.equal(status.inventoryStatus.available, false);
   await f.handle.handleInbound(message('/list', 'directory-offline-list'));
-  assert.match(f.sends.at(-1).text, /暂时无法读取/u);
+  assert.match(f.sends.at(-1).text, /无法确认 DSH 完整会话目录或归档状态/u);
   await f.handle.handleInbound(message('/session', 'directory-offline-bound'));
   assert.match(f.sends.at(-1).text, /已绑定会话/u);
   await f.handle.handleInbound(message('/session add missing', 'directory-offline-bind'));
@@ -481,7 +482,7 @@ test('malformed /list and /session commands are local usage errors, not AI promp
   }
   assert.equal(f.prompts.length, 0);
 });
-test('/list shows all cold DSH sessions; /session lists only explicitly bound ones', async t => {
+test('/list shows unarchived cold conversations but not archives; /session only explicit bindings', async t => {
   const records = [
     { id: 'cold-old', header: { title: '从未广播的历史会话' } },
     { id: 'running', header: { title: '当前会话' } },
@@ -490,11 +491,11 @@ test('/list shows all cold DSH sessions; /session lists only explicitly bound on
   const f = await fixture(t, { records, prebound: false });
   await f.handle.handleInbound(message('/list', 'all-sessions-1'));
   const list = f.sends.at(-1).text;
-  assert.match(list, /全部会话（3 个/u);
+  assert.match(list, /未归档普通会话（2 个/u);
   assert.match(list, /从未广播的历史会话/u);
   assert.match(list, /cold-old/u);
   assert.match(list, /\/session add cold-old/u);
-  assert.match(list, /📦 已归档/u);
+  assert.doesNotMatch(list, /archived-old|归档的会话|📦 已归档/u);
   await f.handle.handleInbound(message('/session', 'bound-none'));
   assert.match(f.sends.at(-1).text, /尚未绑定会话/u);
   await f.handle.handleInbound(message('/session cold-old', 'select-not-bound'));
@@ -525,11 +526,11 @@ test('archived, subagent, nonexistent, and unauthorized sessions cannot be manua
     { id: 'normal', header: { title: '正常' } },
   ] });
   await f.handle.handleInbound(message('/session add archived', 'archive-add'));
-  assert.match(f.sends.at(-1).text, /已归档/u);
+  assert.match(f.sends.at(-1).text, /不在未归档普通会话列表/u);
   await f.handle.handleInbound(message('/session add child', 'child-add'));
-  assert.match(f.sends.at(-1).text, /子代理/u);
+  assert.match(f.sends.at(-1).text, /不在未归档普通会话列表/u);
   await f.handle.handleInbound(message('/session add missing', 'missing-add'));
-  assert.match(f.sends.at(-1).text, /没有这个会话/u);
+  assert.match(f.sends.at(-1).text, /不在未归档普通会话列表/u);
   const before = f.sends.length;
   await f.handle.handleInbound(message('/session add normal', 'intruder-add', 'stranger'));
   assert.equal(f.sends.length, before);
@@ -539,6 +540,54 @@ test('archived, subagent, nonexistent, and unauthorized sessions cannot be manua
   assert.deepEqual(saved.listSessions(), []);
 });
 
+test('/list excludes archived, subagent and blank history without hiding legitimate forks or English titles', async t => {
+  const rows = [
+    { id: 'session-regular', header: { title: 'WPS灵犀代理模型接入方案', cwd: 'E:/Temp' } },
+    { id: 'normal-english', header: { title: 'Complete Loomy Client Implementation', cwd: 'E:/Temp' } },
+    { id: 'subagent-english', header: { title: 'Goal: transform the existing 826-line', origin: 'subagent', parentSession: 'session-regular' } },
+    { id: 'subagent-chinese', header: { title: '内部执行任务', origin: 'subagent', parentSession: 'session-regular' } },
+    { id: 'normal-fork', header: { title: '正常分支会话', parentSession: 'session-regular' } },
+    { id: 'archived-session', header: { title: '以前归档的工作', cwd: 'E:/Temp' }, archived: true },
+    { id: 'empty-session', header: { title: '', cwd: 'E:/Temp' }, blank: true },
+  ];
+  const f = await fixture(t, { records: rows, prebound: false });
+  await f.handle.handleInbound(message('/list', 'filtered-1'));
+  const output = f.sends.map(s => s.text).join('\n');
+  assert.match(output, /未归档普通会话（3 个/u);
+  assert.match(output, /session-regular/u);
+  assert.match(output, /normal-english/u);
+  assert.match(output, /normal-fork/u);
+  assert.doesNotMatch(output, /subagent-english|subagent-chinese|archived-session|empty-session/u);
+  assert.doesNotMatch(output, /以前归档的工作|Goal: transform|内部执行任务/u);
+  assert.equal((await f.request('status')).body.inventoryStatus.visibleCount, 3);
+  for (const id of ['subagent-english', 'subagent-chinese', 'archived-session', 'empty-session']) {
+    const before = f.sends.length;
+    await f.handle.handleInbound(message('/session add ' + id, 'reject-hidden-' + id));
+    assert.match(f.sends.slice(before).map(s => s.text).join('\n'), /不在未归档普通会话列表/u);
+  }
+  await f.handle.handleInbound(message('/session add normal-fork', 'permit-fork'));
+  assert.match(f.sends.at(-1).text, /已手动绑定/u);
+  const bound = await loadRouteStore(f.routeStorePath);
+  assert.deepEqual(bound.listSessions().map(s => s.sessionId), ['normal-fork']);
+});
+
+test('archive updates filter visible /list rows without deleting manual binding preferences', async t => {
+  const rows = [{ id: 'ordinary', header: { title: '普通会话' } }, { id: 'arch', archived: false, header: { title: '随后归档' } }];
+  const f = await fixture(t, { records: rows, prebound: false });
+  await f.handle.handleInbound(message('/session add arch', 'bind-before-archive'));
+  await f.handle.handleInbound(message('/broadcast off arch', 'mute-before-archive'));
+  rows[1].archived = true;
+  await f.handle.handleInbound(message('/list', 'list-after-archive'));
+  assert.doesNotMatch(f.sends.at(-1).text, /arch|随后归档/u);
+  const store = await loadRouteStore(f.routeStorePath);
+  assert.equal(store.getSession('arch').archived, true);
+  assert.equal(store.getSession('arch').broadcastEnabled, false);
+  rows[1].archived = false;
+  await f.handle.handleInbound(message('/list', 'list-after-unarchive'));
+  assert.match(f.sends.at(-1).text, /随后归档/u);
+  const restored = await loadRouteStore(f.routeStorePath);
+  assert.equal(restored.getSession('arch').broadcastEnabled, false);
+});
 test('/list pagination covers cold history without auto-binding, while /session paginates bound records', async t => {
   const records = Array.from({ length: 43 }, (_, index) => ({
     id: 'history-' + String(index).padStart(2, '0'),
@@ -569,9 +618,9 @@ test('when archive registry is unavailable, /list does not claim non-archived an
     { id: 'unknown-archive', header: { title: '状态未知' } },
   ], archiveRegistryUnavailable: true });
   await f.handle.handleInbound(message('/list', 'unknown-archive-list'));
-  assert.match(f.sends.at(-1).text, /归档状态未核实/u);
+  assert.match(f.sends.at(-1).text, /无法确认 DSH 完整会话目录或归档状态/u);
   await f.handle.handleInbound(message('/session add unknown-archive', 'unknown-archive-add'));
-  assert.match(f.sends.at(-1).text, /归档状态未核实/u);
+  assert.match(f.sends.at(-1).text, /无法核实完整会话目录或归档状态/u);
   assert.deepEqual((await f.request('sessions')).body.sessions, []);
 });
 test('pre-existing explicit bindings remain bound; archived unknown sessions remain discovery-only', async t => {
@@ -584,7 +633,8 @@ test('pre-existing explicit bindings remain bound; archived unknown sessions rem
   assert.equal(store.getSession('s-old'), null, 'an archived historical row must not be auto-bound');
   assert.equal(store.getSession('s1').title, '正在写小说');
   await f.handle.handleInbound(message('/list', 'list-archived-historical'));
-  assert.ok(f.sends.some(s => s.text.includes('📦 已归档') && s.text.includes('s-old')));
+  assert.ok(f.sends.some(s => s.text.includes('s1') && s.text.includes('s2')));
+  assert.ok(f.sends.every(s => !s.text.includes('s-old')));
 });
 
 test('idle newly discovered sessions appear only in /list, never auto-bind or broadcast', async t => {
@@ -712,7 +762,7 @@ test('partial or unrecognized DSH directory cannot reclassify or auto-bind sessi
   let stored = await loadRouteStore(f.routeStorePath);
   assert.equal(stored.getSession('s2').archived, false);
   await f.handle.handleInbound(message('/list', 'partial-list-message'));
-  assert.match(f.sends.at(-1).text, /暂时无法读取/u);
+  assert.match(f.sends.at(-1).text, /无法确认 DSH 完整会话目录或归档状态/u);
   mode = 'unknown';
   const unknown = await f.request('status');
   assert.equal(unknown.body.inventoryStatus.supported, false);
@@ -739,7 +789,7 @@ test('unknown persistent directory shape cannot wipe previous bindings', async t
   assert.equal(response.body.inventoryStatus.supported, false);
   assert.deepEqual(response.body.sessions.map(row => row.sessionId).sort(), ['s1', 's2']);
   await f.handle.handleInbound(message('/list', 'unknown-list-shape'));
-  assert.match(f.sends.at(-1).text, /暂时无法读取/u);
+  assert.match(f.sends.at(-1).text, /无法确认 DSH 完整会话目录或归档状态/u);
   assert.equal((await loadRouteStore(f.routeStorePath)).getSession('s1').bound, true);
 });
 
@@ -863,7 +913,7 @@ test('scanning another account saves it but does not interrupt an explicitly sel
 test('WeChat /help is handled inside bridge, never posted into the latest DSH conversation', async t => {
   const f = await fixture(t);
   const response = (await f.request('status')).body;
-  assert.equal(response.version, '0.4.15');
+  assert.equal(response.version, '0.4.16');
   assert.equal(response.enabled, true);
   assert.equal(response.broadcastAll, true);
   await f.handle.handleInbound(message('/help', 'wx-help-direct'));
@@ -953,7 +1003,7 @@ test('legacy v1 reply route stays bound but archived discovered history cannot b
   const response = await f.request('sessions', 'POST', { sessionId: 's-old', broadcastEnabled: false });
   assert.equal(response.statusCode, 404);
   await f.handle.handleInbound(message('/list', 'old-archive-from-v1'));
-  assert.match(f.sends.at(-1).text, /已归档/u);
+  assert.doesNotMatch(f.sends.at(-1).text, /s-old|已归档/u);
   await answer(f.handle.engine, f.records[2], 1, 'archived');
   assert.equal(f.sends.some(s => s.text.includes('archived')), false);
 });

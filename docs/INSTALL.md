@@ -1,4 +1,4 @@
-# 微信助手安装和升级（dsh-wechat-allsessions v0.4.15）
+# 微信助手安装和升级（dsh-wechat-allsessions v0.4.16）
 
 ## 保持原配置及数据
 
@@ -8,7 +8,7 @@
 
 ## 安装
 
-可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.15，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
+可用 DSH 插件管理器更新；若原先按本地源码 file: 方式安装，请将现有依赖更新到 0.4.16，并在当前 Profile 的配置中保留原依赖、旧 bundle 和已有个性化设置。新装时在 Cordis 补丁顶层 YAML 中增加以下 insert 项（**不要覆盖已有数组**）：
 
 ~~~yaml
 - insert:
@@ -39,13 +39,18 @@
 
 ## 完整发现、显式绑定、广播和续聊
 
-插件自动读取全部 DSH 持久化历史会话（包括从未广播、从未加载的旧会话），但**发现不会自动绑定或开始广播**。微信发送 `/list` 查看完整目录，`/session add <会话ID>` 手动绑定需要的未归档普通会话。绑定后该会话默认开启广播；先前手动关闭的偏好保留。
+插件从全部 DSH 持久化历史中筛选**未归档的普通会话**（包含从未广播或加载的旧会话），不会把归档、子代理任务、空白占位会话列进 `/list`；**发现不会自动绑定或广播**。微信发送 `/list` 查看过滤后的目录，`/session add <会话ID>` 手动绑定所需会话。绑定后默认开启广播；历史关闭偏好保留。
 
 微信 `/session` 只显示已绑定会话，`/session <会话ID>` 选择微信普通消息的回复目标。设置页和 `/broadcast off/on <会话ID>` 只管理已绑定会话。`/clear` 只清除当前回复目标，不清除绑定和广播偏好。
 
 广播消息开头固定显示 **对话ID** 和 **对话标题**。只有完成的回复被广播，不补发历史、文件或审批。
 微信消息按完整句子、行与段落安全分段，不截断 /session 会话命令。正文或单句超限时会明确告知省略，绝不发送无法使用的残缺会话 ID。
 
+## v0.4.16 `/list` 可见性过滤修复
+
+`/list` 只展示 DSH 普通、未归档会话，包含从未广播的旧用户会话。读取 Host 持久化目录后使用官方归档集合 `workspaceRegistry.archivedSessionIds`、会话 `origin` 和 `blank` 元数据过滤：已归档、子代理内部会话、空白占位会话均不显示。不按中文/英文或 `Goal`、`Complete` 等词汇猜测。普通会话的 fork 可以有父 ID，不会因此被误当成 subagent。
+
+`/session` 仍只列手动绑定的会话；`/session add <session_id>` 仅允许当前 `/list` 中的未绑定普通会话。无法核实完整目录或归档状态时不进行新绑定；不删除既有绑定、广播设置和持久化历史。`/list -p N` 按过滤后的数量分页。
 ## v0.4.15 冷态历史会话发现与手动绑定
 
 会话发现、绑定记录和微信当前回复目标已独立：`/list` 从 DSH Host `sessionController.list()` 查询持久化全部会话，不依赖只保留已加载会话的 `ctx.sessions.list()`。归档状态根据 `workspaceRegistry.archivedSessionIds` 核实；标题取 DSH Session Projection。此过程不唤醒冷 Agent、不触发模型调用。
@@ -114,9 +119,9 @@ v0.4.7 的 /restart 运行链不启动 CMD 或 PowerShell。进程检查、调�
 检查安装版本不能只查看 GitHub 或源码仓库：必须核验当前 DSH Profile 下 node_modules/dsh-wechat-allsessions/package.json 版本、Host 实际加载的插件代码，并查看 /plugins/dsh-wechat-allsessions/status 的 version。若 /help 仍然进入了“最新 DSH 对话”而不是由微信助手直接回复，则当前微信消息由旧插件/其他桥接接收，排查该消费者之前不要叠加启动新的 getUpdates。状态接口新增的 sendLog.kind=wechat-command 可追踪微信命令回复发送是否成功（没有用户 ID 或敏感 token）。
 
 
-1. 检查已安装插件 package.json 版本为 0.4.15；设置页显示“微信助手”。
+1. 检查已安装插件 package.json 版本为 0.4.16；设置页显示“微信助手”。
 2. 启用后查看 GET /plugins/dsh-wechat-allsessions/status，确认 connected:true、polling:true、broadcastReady:true。
-3. 微信发送 /help、/list，确认以前从未广播的冷态旧会话也出现在全部目录，已归档会话正确标注。
+3. 微信发送 /help、/list，确认以前从未广播的冷态旧会话出现在 `/list`，但已归档、子代理内部会话、空白占位均不显示。
 4. 发送 /session 确认只列已绑定会话；发送 /session add <会话ID> 手动绑定一个未归档旧会话，再用 /session <会话ID> 选择回复目标。
 5. 创建全新未发言 DSH 对话，检查 /list 可发现但 /session 不自动增加；完成回复也不自动广播，直至手动绑定。
 6. 设置页关闭某个已绑定会话广播，验证该会话不再推送、其他已绑定会话照常；微信发送 /broadcast on <会话ID>，设置页应更新。

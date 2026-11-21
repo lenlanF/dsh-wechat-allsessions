@@ -1,7 +1,7 @@
 {
   "name": "dsh-wechat-allsessions",
-  "version": "0.4.15",
-  "description": "微信助手：发现全部 DSH 历史会话，微信端显式绑定未归档会话、选择回复目标、管理广播及续聊。",
+  "version": "0.4.16",
+  "description": "微信助手：筛选 DSH 未归档普通历史会话，微信端手动绑定、选择回复目标与管理广播。",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
